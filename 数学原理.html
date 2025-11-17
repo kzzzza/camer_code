@@ -1,0 +1,421 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>张正友标定法数学流程详解</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            line-height: 1.6;
+            color: #333;
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f8f9fa;
+        }
+        h1 {
+            text-align: center;
+            color: #2c3e50;
+            margin-bottom: 30px;
+        }
+        .section {
+            background-color: white;
+            border-radius: 8px;
+            padding: 25px;
+            margin-bottom: 30px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        .section-title {
+            color: #2c3e50;
+            border-bottom: 2px solid #3498db;
+            padding-bottom: 10px;
+            margin-top: 0;
+        }
+        .math-equation {
+            background-color: #f8f9fa;
+            border-left: 4px solid #3498db;
+            padding: 15px;
+            margin: 15px 0;
+            font-family: 'Cambria Math', 'Times New Roman', serif;
+            overflow-x: auto;
+        }
+        .step {
+            margin-bottom: 20px;
+            padding: 15px;
+            background-color: #f0f7ff;
+            border-radius: 5px;
+        }
+        .step-title {
+            font-weight: bold;
+            margin-bottom: 10px;
+            color: #2c3e50;
+        }
+        .matrix {
+            display: inline-block;
+            margin: 10px;
+            padding: 10px;
+            background-color: #fff;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+            text-align: center;
+        }
+        .matrix table {
+            border-collapse: collapse;
+            margin: 0 auto;
+        }
+        .matrix td {
+            padding: 5px 10px;
+            text-align: center;
+            border: 1px solid #eee;
+        }
+        .highlight {
+            background-color: #fff3cd;
+            padding: 2px 4px;
+            border-radius: 3px;
+        }
+        .note {
+            background-color: #e8f4f8;
+            border-left: 4px solid #3498db;
+            padding: 15px;
+            margin: 20px 0;
+            border-radius: 0 8px 8px 0;
+        }
+        .algorithm {
+            background-color: #f5f5f5;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+            padding: 15px;
+            margin: 15px 0;
+            font-family: Consolas, monospace;
+        }
+        .visualization {
+            display: flex;
+            justify-content: space-around;
+            flex-wrap: wrap;
+            margin: 20px 0;
+        }
+        .vis-item {
+            flex: 1;
+            min-width: 300px;
+            margin: 10px;
+            padding: 15px;
+            background-color: #fff;
+            border-radius: 5px;
+            box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+        }
+        @media (max-width: 768px) {
+            .visualization {
+                flex-direction: column;
+            }
+        }
+    </style>
+    <script src="https://polyfill.io/v3/polyfill.min.js?features=es6"></script>
+    <script id="MathJax-script" async src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
+</head>
+<body>
+    <h1>张正友标定法数学流程详解</h1>
+    
+    <div class="section">
+        <h2 class="section-title">1. 基本投影模型</h2>
+        
+        <div class="step">
+            <div class="step-title">相机投影方程</div>
+            <p>世界坐标系中的3D点 \(P_w = [X, Y, Z, 1]^T\) 投影到图像平面上的2D点 \(p = [u, v, 1]^T\)：</p>
+            <div class="math-equation">
+                \[
+                s \begin{bmatrix} u \\ v \\ 1 \end{bmatrix} = 
+                \begin{bmatrix} f_x & \gamma & u_0 \\ 0 & f_y & v_0 \\ 0 & 0 & 1 \end{bmatrix}
+                \begin{bmatrix} r_{11} & r_{12} & r_{13} & t_x \\ r_{21} & r_{22} & r_{23} & t_y \\ r_{31} & r_{32} & r_{33} & t_z \end{bmatrix}
+                \begin{bmatrix} X \\ Y \\ Z \\ 1 \end{bmatrix}
+                \]
+            </div>
+            <p>其中：</p>
+            <ul>
+                <li>\(K = \begin{bmatrix} f_x & \gamma & u_0 \\ 0 & f_y & v_0 \\ 0 & 0 & 1 \end{bmatrix}\) 是内参矩阵</li>
+                <li>\([R|t] = \begin{bmatrix} r_{11} & r_{12} & r_{13} & t_x \\ r_{21} & r_{22} & r_{23} & t_y \\ r_{31} & r_{32} & r_{33} & t_z \end{bmatrix}\) 是外参矩阵</li>
+                <li>\(s\) 是尺度因子</li>
+            </ul>
+        </div>
+        
+        <div class="step">
+            <div class="step-title">平面标定板假设</div>
+            <p>对于平面标定板，设 \(Z=0\)，则投影方程简化为：</p>
+            <div class="math-equation">
+                \[
+                s \begin{bmatrix} u \\ v \\ 1 \end{bmatrix} = 
+                K \begin{bmatrix} r_1 & r_2 & t \end{bmatrix}
+                \begin{bmatrix} X \\ Y \\ 1 \end{bmatrix} = H
+                \begin{bmatrix} X \\ Y \\ 1 \end{bmatrix}
+                \]
+            </div>
+            <p>其中 \(H = K \begin{bmatrix} r_1 & r_2 & t \end{bmatrix}\) 是3×3的单应性矩阵。</p>
+        </div>
+    </div>
+    
+    <div class="section">
+        <h2 class="section-title">2. 单应性矩阵估计</h2>
+        
+        <div class="step">
+            <div class="step-title">单应性矩阵的约束方程</div>
+            <p>对于每个角点对应关系 \((X,Y) \leftrightarrow (u,v)\)，我们有：</p>
+            <div class="math-equation">
+                \[
+                \begin{cases}
+                u = \frac{h_{11}X + h_{12}Y + h_{13}}{h_{31}X + h_{32}Y + h_{33}} \\
+                v = \frac{h_{21}X + h_{22}Y + h_{23}}{h_{31}X + h_{32}Y + h_{33}}
+                \end{cases}
+                \]
+            </div>
+            <p>整理后得到齐次方程：</p>
+            <div class="math-equation">
+                \[
+                \begin{cases}
+                h_{11}X + h_{12}Y + h_{13} - h_{31}Xu - h_{32}Yu - h_{33}u = 0 \\
+                h_{21}X + h_{22}Y + h_{23} - h_{31}Xv - h_{32}Yv - h_{33}v = 0
+                \end{cases}
+                \]
+            </div>
+        </div>
+        
+        <div class="step">
+            <div class="step-title">构造线性系统</div>
+            <p>对于每个点对应，构造一个2×9的矩阵 \(A_i\)：</p>
+            <div class="math-equation">
+                \[
+                A_i = \begin{bmatrix}
+                X & Y & 1 & 0 & 0 & 0 & -uX & -uY & -u \\
+                0 & 0 & 0 & X & Y & 1 & -vX & -vY & -v
+                \end{bmatrix}
+                \]
+            </div>
+            <p>将所有点对应的 \(A_i\) 堆叠成 \(A\) 矩阵：</p>
+            <div class="math-equation">
+                \[
+                A = \begin{bmatrix} A_1 \\ A_2 \\ \vdots \\ A_n \end{bmatrix}
+                \]
+            </div>
+            <p>我们的目标是求解 \(Ah = 0\)，其中 \(h = [h_{11}, h_{12}, h_{13}, h_{21}, h_{22}, h_{23}, h_{31}, h_{32}, h_{33}]^T\)。</p>
+        </div>
+        
+        <div class="step">
+            <div class="step-title">使用SVD求解</div>
+            <p>对矩阵 \(A\) 进行奇异值分解：</p>
+            <div class="math-equation">
+                \[
+                A = U \Sigma V^T
+                \]
+            </div>
+            <p>其中：</p>
+            <ul>
+                <li>\(U\) 是 \(2n \times 2n\) 的正交矩阵</li>
+                <li>\(\Sigma\) 是 \(2n \times 9\) 的对角矩阵，对角线元素是奇异值</li>
+                <li>\(V\) 是 \(9 \times 9\) 的正交矩阵</li>
+            </ul>
+            <p>解 \(h\) 是 \(V\) 的最后一列（对应最小奇异值的右奇异向量）。</p>
+            
+            <div class="note">
+                <strong>数值稳定性考虑：</strong> 在实际实现中，通常会对坐标进行归一化处理，以提高数值稳定性。
+                归一化包括平移（使质心位于原点）和缩放（使平均距离为 \(\sqrt{2}\)）。
+            </div>
+        </div>
+    </div>
+    
+    <div class="section">
+        <h2 class="section-title">3. 从单应性矩阵求解内参</h2>
+        
+        <div class="step">
+            <div class="step-title">旋转矩阵的正交性约束</div>
+            <p>从 \(H = K[r_1 \ r_2 \ t]\)，我们有：</p>
+            <div class="math-equation">
+                \[
+                \begin{cases}
+                r_1 = K^{-1}h_1 \\
+                r_2 = K^{-1}h_2
+                \end{cases}
+                \]
+            </div>
+            <p>利用旋转矩阵的正交性 \(r_1^T r_2 = 0\) 和 \(||r_1|| = ||r_2||\)：</p>
+            <div class="math-equation">
+                \[
+                \begin{cases}
+                h_1^T K^{-T} K^{-1} h_2 = 0 \\
+                h_1^T K^{-T} K^{-1} h_1 = h_2^T K^{-T} K^{-1} h_2
+                \end{cases}
+                \]
+            </div>
+        </div>
+        
+        <div class="step">
+            <div class="step-title">构造B矩阵</div>
+            <p>令 \(B = K^{-T} K^{-1}\)，由于 \(K\) 的形式，\(B\) 是对称矩阵：</p>
+            <div class="math-equation">
+                \[
+                B = \begin{bmatrix}
+                B_{11} & B_{12} & B_{13} \\
+                B_{12} & B_{22} & B_{23} \\
+                B_{13} & B_{23} & B_{33}
+                \end{bmatrix}
+                \]
+            </div>
+            <p>将约束方程重写为：</p>
+            <div class="math-equation">
+                \[
+                \begin{cases}
+                h_1^T B h_2 = 0 \\
+                h_1^T B h_1 = h_2^T B h_2
+                \end{cases}
+                \]
+            </div>
+        </div>
+        
+        <div class="step">
+            <div class="step-title">构造线性系统</div>
+            <p>对于每个单应性矩阵 \(H_i\)，我们可以得到两个方程：</p>
+            <div class="math-equation">
+                \[
+                \begin{bmatrix}
+                v_{12}^T \\
+                (v_{11} - v_{22})^T
+                \end{bmatrix} b = 0
+                \]
+            </div>
+            <p>其中 \(b = [B_{11}, B_{12}, B_{13}, B_{22}, B_{23}, B_{33}]^T\)，且：</p>
+            <div class="math-equation">
+                \[
+                \begin{aligned}
+                v_{ij} &= [h_{i1}h_{j1}, h_{i1}h_{j2} + h_{i2}h_{j1}, h_{i1}h_{j3} + h_{i3}h_{j1}, \\
+                       & \quad h_{i2}h_{j2}, h_{i2}h_{j3} + h_{i3}h_{j2}, h_{i3}h_{j3}]^T
+                \end{aligned}
+                \]
+            </div>
+            <p>将所有单应性矩阵的约束堆叠，得到 \(Vb = 0\)，其中 \(V\) 是 \(2n \times 6\) 的矩阵。</p>
+        </div>
+        
+        <div class="step">
+            <div class="step-title">求解B矩阵</div>
+            <p>对 \(V\) 进行SVD分解：</p>
+            <div class="math-equation">
+                \[
+                V = U \Sigma V^T
+                \]
+            </div>
+            <p>解 \(b\) 是 \(V\) 的最后一列（对应最小奇异值的右奇异向量）。</p>
+            <p>从 \(b\) 重构 \(B\) 矩阵：</p>
+            <div class="math-equation">
+                \[
+                B = \begin{bmatrix}
+                b_1 & b_2 & b_3 \\
+                b_2 & b_4 & b_5 \\
+                b_3 & b_5 & b_6
+                \end{bmatrix}
+                \]
+            </div>
+        </div>
+        
+        <div class="step">
+            <div class="step-title">从B矩阵求解内参矩阵K</div>
+            <p>已知 \(B = K^{-T}K^{-1}\)，我们可以通过Cholesky分解求解 \(K^{-1}\)：</p>
+            <div class="math-equation">
+                \[
+                K^{-1} = \text{cholesky}(B)
+                \]
+            </div>
+            <p>然后求逆得到 \(K\)。具体地，内参参数可以计算为：</p>
+            <div class="math-equation">
+                \[
+                \begin{aligned}
+                v_0 &= (B_{12}B_{13} - B_{11}B_{23}) / (B_{11}B_{22} - B_{12}^2) \\
+                \lambda &= B_{33} - [B_{13}^2 + v_0(B_{12}B_{13} - B_{11}B_{23})] / B_{11} \\
+                f_x &= \sqrt{\lambda / B_{11}} \\
+                f_y &= \sqrt{\lambda B_{11} / (B_{11}B_{22} - B_{12}^2)} \\
+                \gamma &= -B_{12} f_x^2 f_y / \lambda \\
+                u_0 &= \gamma v_0 / f_y - B_{13} f_x^2 / \lambda
+                \end{aligned}
+                \]
+            </div>
+        </div>
+    </div>
+    
+    <div class="section">
+        <h2 class="section-title">4. 求解外参和畸变系数</h2>
+        
+        <div class="step">
+            <div class="step-title">求解外参矩阵</div>
+            <p>已知内参矩阵 \(K\) 和单应性矩阵 \(H\)，外参可以计算为：</p>
+            <div class="math-equation">
+                \[
+                \begin{aligned}
+                \lambda &= 1 / \|K^{-1}h_1\| \\
+                r_1 &= \lambda K^{-1} h_1 \\
+                r_2 &= \lambda K^{-1} h_2 \\
+                r_3 &= r_1 \times r_2 \\
+                t &= \lambda K^{-1} h_3
+                \end{aligned}
+                \]
+            </div>
+            <p>由于噪声影响，计算出的 \(R = [r_1 \ r_2 \ r_3]\) 可能不是严格的正交矩阵，需要通过SVD进行正交化：</p>
+            <div class="math-equation">
+                \[
+                \begin{aligned}
+                R &= U \Sigma V^T \\
+                R' &= U V^T \quad (\text{确保} \det(R') = 1)
+                \end{aligned}
+                \]
+            </div>
+        </div>
+        
+        <div class="step">
+            <div class="step-title">非线性优化</div>
+            <p>使用Levenberg-Marquardt算法最小化重投影误差：</p>
+            <div class="math-equation">
+                \[
+                \min \sum_{i=1}^{n} \sum_{j=1}^{m} \| p_{ij} - \hat{p}(K, k_1, k_2, R_i, t_i, P_j) \|^2
+                \]
+            </div>
+            <p>其中：</p>
+            <ul>
+                <li>\(p_{ij}\) 是第 \(i\) 张图像中第 \(j\) 个角点的观测位置</li>
+                <li>\(\hat{p}\) 是投影函数，包括畸变模型：</li>
+            </ul>
+            <div class="math-equation">
+                \[
+                \begin{aligned}
+                x' &= x / z, \quad y' = y / z \\
+                r^2 &= x'^2 + y'^2 \\
+                x'' &= x'(1 + k_1 r^2 + k_2 r^4) + 2p_1 x' y' + p_2 (r^2 + 2x'^2) \\
+                y'' &= y'(1 + k_1 r^2 + k_2 r^4) + p_1 (r^2 + 2y'^2) + 2p_2 x' y' \\
+                u &= f_x x'' + \gamma y'' + u_0 \\
+                v &= f_y y'' + v_0
+                \end{aligned}
+                \]
+            </div>
+        </div>
+    </div>
+    
+    <div class="section">
+        <h2 class="section-title">5. 算法总结</h2>
+        
+        <div class="algorithm">
+            <strong>张正友标定法算法步骤：</strong><br><br>
+            1. 采集多张不同姿态的棋盘格图像<br>
+            2. 检测每张图像的角点位置<br>
+            3. 对每张图像估计单应性矩阵 H (使用SVD)<br>
+            4. 利用所有H构造约束方程，求解B矩阵<br>
+            5. 通过Cholesky分解从B矩阵求解内参矩阵K<br>
+            6. 利用K和H计算每张图像的外参R,t<br>
+            7. 使用非线性优化联合优化所有参数<br>
+            8. 输出最终的内参、外参和畸变系数
+        </div>
+        
+        <div class="note">
+            <strong>关键优势：</strong><br>
+            • 只需要平面标定板，易于制作<br>
+            • 线性初始化提供良好的初值，提高非线性优化的收敛性<br>
+            • 能够同时估计内参、外参和畸变系数<br>
+            • 在计算机视觉领域广泛应用，具有很好的实用性
+        </div>
+    </div>
+
+</body>
+</html>
