@@ -16,9 +16,9 @@
   - `scripts/calibrate_cli.py` — 运行标定（读取图片 glob、参数/自由度开关）
   - `scripts/evaluate_intrinsics.py` — 评估重投影 RMS、误差可视化、可与 GT 对比
   - `scripts/visualize_corners.py` — 检测并绘制棋盘角点
-  - `scripts/generate_chessboard.py` — 生成标准棋盘与仿真拍摄图
+  - `scripts/generate_chessboard.py` — 生成可打印棋盘板及多种外观/质量变体
 - `images/` — 示例/输出目录（脚本会在此写入）
-  - `images/generated/` — 标准正视棋盘图（无畸变，top-down）
+  - `images/boards/` — 可打印棋盘板各变体输出（standard/blur/perspective/...）
   - `images/visualized/` — 可视化输出（角点、重投影残差）
 - `runs/` — 实验日志存放目录
 - `requirements.txt` — Python 依赖
@@ -268,6 +268,70 @@ images/boards/perspective/chess_9x6_002.png
 - noise     : 叠加纹理噪声（打印纸面污点/纹理）
 
 建议：打印时保持高分辨率（避免额外插值），确保物理方格尺寸与 `--square` 对应的单位换算记录在旁，以便后续标定时使用准确物理尺寸。
+
+---
+
+### e) 训练/测试拆分验证：`scripts/calibrate_split_eval.py`
+
+用训练集图片做标定，用未参与标定的测试集图片评估泛化误差，防止过拟合并更贴近真实使用。
+
+示例 1：显式提供训练/测试两套图片
+
+```bash
+PYTHONPATH=$(pwd) python scripts/calibrate_split_eval.py \
+  --train-images 'images/train/*.png' \
+  --test-images  'images/test/*.png' \
+  --pattern 9 6 \
+  --square 0.029 \
+  --use-ransac \
+  --enable-k3 --free-tangential \
+  --iter 150 --eps 1e-6 \
+  --vis-out images/eval_visualized_split \
+  --log-json runs/2025-11-18_split.json
+```
+
+示例 2：从同一 glob 随机按比例划分（无需提供两个路径）
+
+```bash
+PYTHONPATH=$(pwd) python scripts/calibrate_split_eval.py \
+  --images 'images/11_15_2058/*.jpg' \
+  --split 0.7 \
+  --pattern 9 6 \
+  --square 0.029 \
+  --use-ransac \
+  --iter 150 --eps 1e-6 \
+  --split-seed 42 \
+  --vis-out 'images/split_rms/'
+  --log-json runs/2025-11-18_split_single_glob.json
+```
+
+参数表：
+
+| 选项 | 类型/默认 | 说明 |
+|---|---|---|
+| `--train-images` | str, 可选 | 训练集图片 glob（模式一：与 `--test-images` 搭配使用） |
+| `--test-images` | str, 可选 | 测试集图片 glob（模式一） |
+| `--images` | str, 可选 | 单一图片 glob（模式二：与 `--split` 搭配，脚本内部随机划分） |
+| `--split` | float, 可选 | 训练集比例 (0~1)，如 0.7；仅在提供 `--images` 时生效 |
+| `--split-seed` | int, 可选 | 随机划分种子（设定以复现相同划分） |
+| `--pattern` | int int, 必填 | 内角点数：cols rows |
+| `--square` | float, 必填 | 方格物理尺寸 |
+| `--use-ransac` | flag=false | 单应估计使用 RANSAC |
+| `--free-skew` | flag=false | 允许估计 skew |
+| `--free-tangential` | flag=false | 允许切向畸变 |
+| `--enable-k3` | flag=false | 允许三阶径向畸变 |
+| `--fix-principal-point` | flag=false | 固定主点不优化 |
+| `--iter` | int=100 | 最大迭代次数 |
+| `--eps` | float=1e-6 | 收敛阈值 |
+| `--vis-out` | 路径=None | 将“测试集”重投影残差可视化保存到目录 |
+| `--show-vis` | flag=false | 屏幕显示可视化结果 |
+| `--arrow-scale` | float=1.0 | 可视化箭头缩放 |
+| `--log-json` | 路径=None | 保存条件+结果 JSON，传 `-` 输出到标准输出 |
+
+输出：
+- 训练集标定结果（K、dist、calibrate RMS）
+- 训练/测试集的总体 RMS 与测试集每图 RMS
+- 可选测试集可视化与 JSON 日志
 
 ---
 ## 典型实验与对比
