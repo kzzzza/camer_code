@@ -1,15 +1,14 @@
-# Zhang 相机标定（可调参数 | 详尽说明）
+# Zhang 相机标定（NJU数字图像处理与计算机视觉大作业231180007）
+
 
 这是一个基于张友定方法 (Zhang, 2000) 的灵活相机标定工程。核心流程：
 - 检测棋盘角点 → 估计单应矩阵（可选 RANSAC）→ 张氏线性内参初值 → OpenCV `calibrateCamera` 联合优化
-- 提供生成、可视化、评估脚本，便于做参数对比实验（skew/切向畸变/k3、RANSAC、迭代准则等）
+- 提供生成标定板、标定、可视化、评估脚本，便于做参数对比实验（skew/切向畸变/k3、RANSAC、迭代准则等）
 
-本文档包含：
-1) Conda 环境配置与安装；2) 命令行使用说明（参数表格+示例）；3) 标定实验流程图（含可选分支）。
 
 ---
 
-## 目录结构（关键文件）
+## 工程代码目录结构
 
 - `calib/` — 标定库实现
   - `calib/calibrate.py` — 核心：角点检测、单应估计、Zhang 线性解、外参恢复、联合优化（cv2.calibrateCamera）
@@ -20,8 +19,8 @@
   - `scripts/generate_chessboard.py` — 生成标准棋盘与仿真拍摄图
 - `images/` — 示例/输出目录（脚本会在此写入）
   - `images/generated/` — 标准正视棋盘图（无畸变，top-down）
-  - `images/calib/` — 仿真相机拍摄图（透视变形、噪声、模糊）
   - `images/visualized/` — 可视化输出（角点、重投影残差）
+- `runs/` — 实验日志存放目录
 - `requirements.txt` — Python 依赖
 
 ---
@@ -94,9 +93,9 @@ PYTHONPATH=$(pwd) python scripts/calibrate_cli.py \
 | `CALIB_FIX_K3` | 固定三阶径向畸变不优化 | `k3` 固定（通常 0） | 畸变不大/数据不足时避免过拟合 | 取消此固定用 `--enable-k3` |
 | `CALIB_FIX_PRINCIPAL_POINT` | 固定主点不优化 | `(cx,cy)` 固定 | 视角不丰富或主点已知更可信 | 开启 `--fix-principal-point` |
 
-提示：`FIX_xxx` 的语义是“保持输入值不变”，如果使用它们，请确保你的输入初值就是希望固定的数值。
+提示：`FIX_xxx` 的语义是“保持输入值不变”，如果使用它们，请确保输入初值就是希望固定的数值。
 
-建议何时放开：
+使用条件：
 - 放开 `k3`（`--enable-k3`）用于广角/鱼眼且视图充足；
 - 放开切向（`--free-tangential`）在装配偏心可疑或残差呈切向趋势时；
 - 固定主点（`--fix-principal-point`）在视角不足时避免漂移；
@@ -288,7 +287,7 @@ images/boards/perspective/chess_9x6_002.png
 
 ---
 
-## 参考与致谢
+## 参考
 
 - Zhang, Z. (2000). A Flexible New Technique for Camera Calibration. IEEE TPAMI.
 - OpenCV Calibration: https://docs.opencv.org/4.x/d9/d0c/group__calib3d.html
