@@ -164,10 +164,11 @@ def main():
     parser.add_argument('--square', type=float, required=True, help='方格物理尺寸（例如 0.025 米）')
     parser.add_argument('--use-ransac', action='store_true')
     parser.add_argument('--gt-k', type=str, default=None, help='可选：真实内参文件（.npy 或 JSON）')
-    parser.add_argument('--out', type=str, default=None, help='可选：将评估报告保存为 JSON')
+    parser.add_argument('--out', type=str, default=None, help='可选：将评估报告保存为 JSON（仅评估结果；更完整可用 --log-json）')
     parser.add_argument('--vis-out', type=str, default=None, help='可选：保存误差可视化图像的目录（例如 images/eval_visualized）')
     parser.add_argument('--show-vis', action='store_true', help='可选：在屏幕上显示可视化图像')
     parser.add_argument('--arrow-scale', type=float, default=1.0, help='可选：重投影向量的缩放系数（用于可视化）')
+    parser.add_argument('--log-json', type=str, default=None, help="可选：将本次评估的条件+结果输出为 JSON（提供路径，或 '-' 输出到标准输出）")
     args = parser.parse_args()
 
     images = glob.glob(args.images)
@@ -234,6 +235,55 @@ def main():
         vis_out_dir = os.path.abspath(vis_out_dir)
         print('\nVisualizing residuals to', vis_out_dir)
         visualize_residuals(images, used, imgpoints, residuals, vis_out_dir, show=args.show_vis, arrow_scale=args.arrow_scale)
+
+    # 结构化 JSON 日志（条件 + 标定 + 评估）
+    if args.log_json:
+        import datetime
+        timestamp = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        log = {
+            'timestamp': timestamp,
+            'opencv_version': cv2.__version__,
+            'images_glob': args.images,
+            'matched_image_count': len(images),
+            'used_image_count': len(used),
+            'used_images': used,
+            'pattern': [pattern[0], pattern[1]],
+            'square': float(args.square),
+            'use_ransac': bool(args.use_ransac),
+            'visualization': {
+                'vis_out': vis_out_dir if vis_out_dir is not None else None,
+                'show_vis': bool(args.show_vis),
+                'arrow_scale': float(args.arrow_scale)
+            },
+            'calibration_results': {
+                'K_init': res['K_init'].tolist(),
+                'K': res['K'].tolist(),
+                'dist': res['dist'].tolist(),
+                'calibrate_rms': float(res.get('rms', float('nan')))
+            },
+            'evaluation_results': {
+                'overall_reprojection_rms_px': float(overall_rms),
+                'per_image_rms_px': per_rms
+            }
+        }
+        if args.gt_k is not None and 'K_diffs' in locals() or 'K_diffs' in report:
+            # 将 GT 对比并入日志（若存在）
+            if 'K_gt' in report:
+                log['evaluation_results']['K_gt'] = report['K_gt']
+            if 'K_diffs' in report:
+                log['evaluation_results']['K_diffs'] = report['K_diffs']
+        try:
+            if args.log_json.strip() == '-':
+                print('\n=== JSON LOG (evaluate_intrinsics) ===')
+                print(json.dumps(log, ensure_ascii=False, indent=2))
+            else:
+                out_path = os.path.abspath(args.log_json)
+                os.makedirs(os.path.dirname(out_path), exist_ok=True)
+                with open(out_path, 'w', encoding='utf-8') as f:
+                    json.dump(log, f, ensure_ascii=False, indent=2)
+                print('Evaluation JSON log saved to', out_path)
+        except Exception as e:
+            print('写入评估 JSON 日志失败：', repr(e))
 
 
 if __name__ == '__main__':

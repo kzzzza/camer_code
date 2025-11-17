@@ -20,6 +20,8 @@ import argparse
 import glob
 import sys
 import os
+import datetime
+import json
 
 # 确保项目根加入 sys.path（支持从任意工作目录调用脚本）
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -86,6 +88,10 @@ def parse_args():
     parser.add_argument('--eps', type=float, default=1e-6,
                         help='联合优化收敛阈值 (criteria epsilon)')
 
+    # 日志输出
+    parser.add_argument('--log-json', type=str, default=None,
+                        help="将本次实验条件与标定结果保存为 JSON（提供路径，或 '-' 输出到标准输出）")
+
     return parser.parse_args()
 
 
@@ -101,8 +107,41 @@ def main():
     pattern = (args.pattern[0], args.pattern[1])
     flags = build_flags(args)
 
-    # 构造终止条件
+    # ===== 实验条件日志（标定前） =====
     import cv2
+    opencv_version = cv2.__version__
+    def decode_flags(f):
+        names = []
+        candidates = [
+            'CALIB_USE_INTRINSIC_GUESS', 'CALIB_FIX_SKEW', 'CALIB_ZERO_TANGENT_DIST',
+            'CALIB_FIX_TANGENT_DIST', 'CALIB_FIX_K3', 'CALIB_FIX_PRINCIPAL_POINT'
+        ]
+        for n in candidates:
+            if hasattr(cv2, n):
+                val = getattr(cv2, n)
+                if f & val:
+                    names.append(n)
+        return names
+    flag_names = decode_flags(flags)
+    timestamp = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    print('\n=== 标定实验条件 ===')
+    print(f'Time: {timestamp}')
+    print(f'OpenCV version: {opencv_version}')
+    print(f'Images glob: {args.images}')
+    print(f'Matched image count: {len(images)}')
+    print(f'Pattern (cols x rows): {pattern[0]} x {pattern[1]} (total corners: {pattern[0]*pattern[1]})')
+    print(f'Square size (physical units): {args.square}')
+    print(f'Use RANSAC: {args.use_ransac}')
+    print(f'Free skew: {args.free_skew}')
+    print(f'Free tangential: {args.free_tangential}')
+    print(f'Enable k3: {args.enable_k3}')
+    print(f'Fix principal point: {args.fix_principal_point}')
+    print(f'Max iterations (criteria): {args.iter}')
+    print(f'Epsilon (criteria): {args.eps}')
+    print('Resolved OpenCV flags:', ', '.join(flag_names) if flag_names else '(none / unsupported)')
+    print('================================')
+
+    # 构造终止条件
     criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER,
                 int(args.iter),
                 float(args.eps))
@@ -125,6 +164,23 @@ def main():
     print('\n=== 标定结果 ===')
     print('图片数量（匹配到）：', len(images))
     print('成功使用图片数量：', len(res['used_images']))
+    # 打印使用的图片（过长时截断）
+    MAX_LIST = 10
+    used_list = res['used_images']
+    if len(used_list) <= MAX_LIST:
+        print('Used images:')
+        for p in used_list:
+            print('  -', p)
+    else:
+        print(f'Used images (first {MAX_LIST}/{len(used_list)}):')
+        for p in used_list[:MAX_LIST]:
+            print('  -', p)
+        print('  ... (truncated)')
+    # 记录实验条件快照（便于日志对比）
+    print('\n=== 条件快照复核 ===')
+    print(f'RANSAC={args.use_ransac}, skew_free={args.free_skew}, tangential_free={args.free_tangential}, k3_enabled={args.enable_k3}, fix_pp={args.fix_principal_point}')
+    print('Flags decoded:', ', '.join(flag_names) if flag_names else '(none)')
+    print('================================')
     print('K (初始)：\n', res['K_init'])
     print('K (优化)：\n', res['K'])
     print('dist (k1,k2)：', res['dist'])
@@ -140,6 +196,51 @@ def main():
         print('警告：RMS > 2 像素，检查角点检测质量、视角多样性，或启用 --use-ransac。')
 
     print('\n可下一步运行 evaluate_intrinsics.py 进行误差可视化。')
+
+    # ===== 结构化 JSON 日志输出 =====
+    if args.log_json:
+        log = {
+            'timestamp': timestamp,
+            'opencv_version': opencv_version,
+            'images_glob': args.images,
+            'matched_image_count': len(images),
+            'used_image_count': len(res['used_images']),
+            'used_images': res['used_images'],
+            'pattern': [pattern[0], pattern[1]],
+            'square': args.square,
+            'use_ransac': bool(args.use_ransac),
+            'free_skew': bool(args.free_skew),
+            'free_tangential': bool(args.free_tangential),
+            'enable_k3': bool(args.enable_k3),
+            'fix_principal_point': bool(args.fix_principal_point),
+            'criteria': {
+                'type': 'EPS+MAX_ITER',
+                'max_iter': int(args.iter),
+                'epsilon': float(args.eps)
+            },
+            'opencv_flags': {
+                'names': flag_names,
+                'value': int(flags)
+            },
+            'results': {
+                'K_init': res['K_init'].tolist() if hasattr(res['K_init'], 'tolist') else res['K_init'],
+                'K': res['K'].tolist() if hasattr(res['K'], 'tolist') else res['K'],
+                'dist': res['dist'].tolist() if hasattr(res['dist'], 'tolist') else res['dist'],
+                'rms': float(res.get('rms', float('nan')))
+            }
+        }
+        try:
+            if args.log_json.strip() == '-':
+                print('\n=== JSON LOG ===')
+                print(json.dumps(log, ensure_ascii=False, indent=2))
+            else:
+                out_path = os.path.abspath(args.log_json)
+                os.makedirs(os.path.dirname(out_path), exist_ok=True)
+                with open(out_path, 'w', encoding='utf-8') as f:
+                    json.dump(log, f, ensure_ascii=False, indent=2)
+                print('JSON log saved to', out_path)
+        except Exception as e:
+            print('写入 JSON 日志失败：', repr(e))
 
 
 if __name__ == '__main__':
