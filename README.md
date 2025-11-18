@@ -21,6 +21,7 @@
   - `images/boards/` — 可打印棋盘板各变体输出（standard/blur/perspective/...）
   - `images/visualized/` — 可视化输出（角点、重投影残差）
 - `runs/` — 实验日志存放目录
+- `理论文档` — 理论说明HTML文档存放目录
 - `requirements.txt` — Python 依赖
 
 ---
@@ -86,10 +87,10 @@ PYTHONPATH=$(pwd) python scripts/calibrate_cli.py \
 
 | OpenCV flag | 作用 | 对优化变量的影响 | 典型使用场景 | CLI 对应 |
 |---|---|---|---|---|
-| `CALIB_USE_INTRINSIC_GUESS` | 使用你提供的初始内参/畸变作为初值 | 从初值开始优化 | 你已有合理初值（如 Zhang 线性解） | 默认启用 |
+| `CALIB_USE_INTRINSIC_GUESS` | 使用提供的初始内参/畸变作为初值 | 从初值开始优化 | 已有合理初值（如 Zhang 线性解） | 默认启用 |
 | `CALIB_FIX_SKEW` | 固定 skew 不优化 | `s` 固定（通常为 0） | 大多数相机像素近似正交 | 取消此固定用 `--free-skew` |
 | `CALIB_ZERO_TANGENT_DIST` | 切向畸变置零且固定 | `p1=p2=0`，不优化 | 装配良好、可忽略切向畸变 | 取消置零用 `--free-tangential` |
-| `CALIB_FIX_TANGENT_DIST` | 固定切向畸变为“输入值” | `p1,p2` 不变 | 你想保留非零的已知 `p1/p2` | 当 ZERO 不可用时回退使用（版本兼容） |
+| `CALIB_FIX_TANGENT_DIST` | 固定切向畸变为“输入值” | `p1,p2` 不变 | 保留非零的已知 `p1/p2` | 当 ZERO 不可用时回退使用（版本兼容） |
 | `CALIB_FIX_K3` | 固定三阶径向畸变不优化 | `k3` 固定（通常 0） | 畸变不大/数据不足时避免过拟合 | 取消此固定用 `--enable-k3` |
 | `CALIB_FIX_PRINCIPAL_POINT` | 固定主点不优化 | `(cx,cy)` 固定 | 视角不丰富或主点已知更可信 | 开启 `--fix-principal-point` |
 
@@ -115,7 +116,7 @@ PYTHONPATH=$(pwd) python scripts/calibrate_cli.py \
 
 #### 结构化 JSON 日志
 
-你可以把本次实验条件与标定结果保存为 JSON：
+可以把本次实验条件与标定结果保存为 JSON：
 
 ```bash
 # 保存到文件
@@ -212,7 +213,7 @@ PYTHONPATH=$(pwd) python scripts/visualize_corners.py \
 
 ### d) 生成可打印多变体棋盘板：`scripts/generate_chessboard.py`
 
-新版生成脚本只输出“可打印的棋盘标定板”及其多种质量/外观变体，不再直接生成模拟拍照图。你可以打印这些图，再用真实相机拍摄做标定，以测试不同板质量对标定精度的影响。
+新版生成脚本只输出“可打印的棋盘标定板”及其多种质量/外观变体。打印，再用真实相机拍摄做标定，以测试不同板质量对标定精度的影响。
 
 示例（生成标准+模糊+透视+噪声+对比度变体，每种 5 张）：
 
