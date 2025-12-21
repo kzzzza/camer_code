@@ -1,10 +1,8 @@
 # Zhang 相机标定（NJU数字图像处理与计算机视觉大作业231180007）
 
-
 基于张友定方法 (Zhang, 2000) 的灵活相机标定工程。核心流程：
 - 检测棋盘角点 → 估计单应矩阵（可选 RANSAC）→ 张氏线性内参初值 → OpenCV `calibrateCamera` 联合优化
 - 提供生成标定板、标定、可视化、评估脚本，便于做参数对比实验（skew/切向畸变/k3、RANSAC、迭代准则等）
-
 
 ---
 
@@ -49,8 +47,6 @@ PYTHONPATH=$(pwd) python scripts/calibrate_cli.py --help
 
 本项目的统一 CLI 已简化为单一模式 `--mode all`，旧的子命令（calibrate / evaluate / split-eval / visualize）已在代码中移除。请使用如下方式在一次运行中完成标定与评估，并统一输出到指定 bundle 目录。
 
-### all 模式：`scripts/calibrate_cli.py --mode all`
-
 示例（建议使用 RANSAC 与默认稳健设置）：
 
 ```bash
@@ -59,6 +55,8 @@ PYTHONPATH=$(pwd) python scripts/calibrate_cli.py --mode all \
   --pattern 9 6 \
   --square 0.029 \
   --use-ransac \
+  --val-ratio 0.3 \
+  --split-seed 42 \
   --bundle run_1221 \
   --per-image-heatmap
 ```
@@ -82,13 +80,21 @@ PYTHONPATH=$(pwd) python scripts/calibrate_cli.py --mode all \
 | `--grid` | int int=10 8 | 空间误差统计网格（列 行），用于聚合所有图的误差分布 |
 | `--per-image-heatmap` | flag=false | 同时输出每张图片的误差热力图（输出到 bundle 目录） |
 | `--bundle` | str=None | 将输出统一打包到项目根 `out/<name>/` 下（单一 JSON + 所有图片） |
+| `--val-ratio` | float=0.3 | 验证集占比（其余作为训练集，仅用训练集进行标定） |
+| `--split-seed` | int=42 | 数据划分随机种子（保证复现） |
 
-输出内容（bundle 模式）：
+输出内容（bundle 模式，带训练/验证划分）：
 
-- 目录：`out/<bundle>/`
-  - 残差可视化图片：与输入 used images 一一对应的 PNG
-  - 聚合热力图：`rms_heatmap.png`
-  - 结构化 JSON：`results_all.json`
+- 根目录：`out/<bundle>/`
+  - 综合 JSON：`results_all.json`（含 split 信息、训练标定结果、train/val 的评估指标与可视化文件列表）
+  - 训练子目录：`out/<bundle>/train/`
+    - 每张训练图片残差可视化 PNG
+    - 训练集聚合热力图：`rms_heatmap.png`
+    - 子集 JSON：`results_train.json`
+  - 验证子目录：`out/<bundle>/val/`
+    - 每张验证图片残差可视化 PNG（若角点检测成功）
+    - 验证集聚合热力图：`rms_heatmap.png`
+    - 子集 JSON：`results_val.json`
 
 可视化与色彩规则：
 

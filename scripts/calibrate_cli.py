@@ -1,10 +1,9 @@
 """统一相机标定与评估 CLI（仅保留 all 模式）
 
-模式（--mode）：
-- all : 在一次运行中依次执行 calibrate + evaluate，并统一打包输出
+在一次运行中依次执行 calibrate + evaluate，并统一打包输出
 
 示例：
-python scripts/calibrate_cli.py --mode all --images 'images/calib/*.png' --pattern 9 6 --square 0.029 --bundle run_all
+python scripts/calibrate_cli.py --images 'images/calib/*.png' --pattern 9 6 --square 0.029 --bundle run_name
 """
 
 import argparse
@@ -72,6 +71,10 @@ def build_parser():
     parser.add_argument('--grid', nargs=2, type=int, default=[10, 8], help='空间误差统计网格大小（列 行），用于聚合所有图的误差分布')
     parser.add_argument('--per-image-heatmap', action='store_true', help='同时输出每张图片的误差热力图（输出到 bundle 目录）')
     parser.add_argument('--bundle', type=str, default=None, help='将输出统一打包到项目根 out/<name>/ 下（单一 JSON + 所有图片）')
+
+    # 数据集划分选项
+    parser.add_argument('--val-ratio', type=float, default=0.3, help='验证集占比（0~1），其余作为训练集，仅用训练集进行标定')
+    parser.add_argument('--split-seed', type=int, default=42, help='数据划分随机种子（确保可复现的划分）')
 
     return parser
 
@@ -205,6 +208,26 @@ def visualize_heatmap(rms_grid: np.ndarray, counts: np.ndarray, out_path: str, t
     cv2.imwrite(out_path, heat)
 
 
+def evaluate_set(set_name: str,
+                 images_set,
+                 K_est: np.ndarray,
+                 dist_est: np.ndarray,
+                 bins_x: int,
+                 bins_y: int,
+                 out_dir: str,
+                 show_vis: bool,
+                 arrow_scale: float,
+                 per_image_heatmap: bool):
+    """对一个数据子集（train 或 val）进行评估与可视化，并返回指标与输出文件列表。"""
+    ensure_dir(out_dir)
+    print(f"\n=== Evaluate [{set_name}] ===")
+    objpoints, imgpoints, used = detect_corners(images_set, pattern=None, square=None)
+    # 上述调用需要 pattern 与 square，但当前 calib.detect_corners 签名是 (images, pattern, square)
+    # 因此我们在此处不传 None，而在主流程中以闭包变量注入。为避免困扰，实际实现见主流程。
+    # 此占位函数仅用于结构说明。
+    return {}
+
+
 # ---------------------- 单一模式实现（all） ----------------------
 def cmd_all(args):
     # 1) 校验与准备
@@ -230,55 +253,100 @@ def cmd_all(args):
     bundle_dir = os.path.abspath(os.path.join(ROOT, 'out', args.bundle or 'run_all'))
     ensure_dir(bundle_dir)
 
-    # 2) calibrate
-    print('\n=== [1/2] Calibrate ===')
+    # 2) 数据集划分（train/val）
+    val_ratio = float(args.val_ratio)
+    val_ratio = min(max(val_ratio, 0.0), 0.9)  # 防止全部进验证集
+    rng = np.random.default_rng(int(args.split_seed))
+    images_shuffled = images[:]
+    rng.shuffle(images_shuffled)
+    n_total = len(images_shuffled)
+    n_val = int(np.floor(n_total * val_ratio))
+    n_val = min(max(n_val, 1), n_total - 3)  # 至少预留 3 张给训练
+    val_images = images_shuffled[:n_val]
+    train_images = images_shuffled[n_val:]
+
+    print(f"\n=== [Split] total={n_total}, train={len(train_images)}, val={len(val_images)}, ratio={val_ratio:.2f}, seed={int(args.split_seed)} ===")
+
+    # 3) calibrate（仅使用训练集）
+    print('\n=== [1/3] Calibrate (Train) ===')
     try:
-        calib_res = calibrate_from_images(images, pattern, args.square, use_ransac=args.use_ransac, calib_flags=flags, criteria=criteria)
+        calib_res = calibrate_from_images(train_images, pattern, args.square, use_ransac=args.use_ransac, calib_flags=flags, criteria=criteria)
     except Exception as e:
         print('标定失败：', repr(e))
         return 2
-    print('使用图片数量：', len(calib_res['used_images']))
+    print('训练集使用图片数量：', len(calib_res['used_images']))
     print('K (优化)：\n', calib_res['K'])
     print('dist (k1,k2)：', calib_res['dist'])
-    print('训练/总体 RMS (calibrateCamera)：', calib_res.get('rms', 'N/A'))
+    print('训练 RMS (calibrateCamera)：', calib_res.get('rms', 'N/A'))
 
-    # 3) evaluate
-    print('\n=== [2/2] Evaluate ===')
-    objpoints, imgpoints, used = detect_corners(images, pattern, args.square)
-    if len(objpoints) < 3:
-        print('至少需要 3 张成功检测到角点的图片进行可靠评估（当前: %d）' % len(objpoints))
-        return 2
     K_est, dist_est = calib_res['K'], calib_res['dist']
-    overall_rms, per_rms, residuals = compute_reprojection_stats(K_est, dist_est, objpoints, imgpoints)
     bins_x, bins_y = int(args.grid[0]), int(args.grid[1])
-    rms_grid, counts_grid = compute_spatial_heatmap(used, imgpoints, residuals, bins_x, bins_y)
-    # 评估可视化输出到 bundle_dir
-    vis_out_dir = os.path.abspath(bundle_dir)
-    print('\nVisualizing residuals to', vis_out_dir)
-    visualize_residuals(used, imgpoints, residuals, vis_out_dir, show=args.show_vis, arrow_scale=args.arrow_scale)
-    heat_out = os.path.join(vis_out_dir, 'rms_heatmap.png')
-    visualize_heatmap(rms_grid, counts_grid, heat_out, title=f'RMS heatmap ({bins_x}x{bins_y})')
-    eval_files = [os.path.join(vis_out_dir, os.path.basename(p)) for p in used]
-    eval_files.append(heat_out)
+
+    # 4) evaluate（分别对训练集与验证集）
+    print('\n=== [2/3] Evaluate (Train) ===')
+    obj_tr, img_tr, used_tr = detect_corners(train_images, pattern, args.square)
+    if len(obj_tr) < 3:
+        print('训练集有效图片不足 3 张，无法可靠评估（当前: %d）' % len(obj_tr))
+        return 2
+    overall_rms_tr, per_rms_tr, residuals_tr = compute_reprojection_stats(K_est, dist_est, obj_tr, img_tr)
+    rms_grid_tr, counts_grid_tr = compute_spatial_heatmap(used_tr, img_tr, residuals_tr, bins_x, bins_y)
+
+    train_dir = os.path.join(bundle_dir, 'train')
+    ensure_dir(train_dir)
+    print('\nVisualizing residuals (train) to', train_dir)
+    visualize_residuals(used_tr, img_tr, residuals_tr, train_dir, show=args.show_vis, arrow_scale=args.arrow_scale)
+    heat_train = os.path.join(train_dir, 'rms_heatmap.png')
+    visualize_heatmap(rms_grid_tr, counts_grid_tr, heat_train, title=f'Train RMS heatmap ({bins_x}x{bins_y})')
+    eval_files_tr = [os.path.join(train_dir, os.path.basename(p)) for p in used_tr]
+    eval_files_tr.append(heat_train)
     if args.per_image_heatmap:
-        for path, pts, residual in zip(used, imgpoints, residuals):
+        for path, pts, residual in zip(used_tr, img_tr, residuals_tr):
             rms_i, counts_i = compute_spatial_heatmap([path], [pts], [residual], bins_x, bins_y)
             fname = os.path.splitext(os.path.basename(path))[0]
-            out_i = os.path.join(vis_out_dir, f'{fname}_heatmap.png')
-            visualize_heatmap(rms_i, counts_i, out_i, title=f'RMS heatmap {fname}')
-            eval_files.append(out_i)
+            out_i = os.path.join(train_dir, f'{fname}_heatmap.png')
+            visualize_heatmap(rms_i, counts_i, out_i, title=f'Train RMS {fname}')
+            eval_files_tr.append(out_i)
+
+    print('\n=== [3/3] Evaluate (Val) ===')
+    obj_val, img_val, used_val = detect_corners(val_images, pattern, args.square)
+    if len(obj_val) < 1:
+        print('验证集角点检测失败或数量为 0（当前: %d）' % len(obj_val))
+        # 允许继续，但标记为空评估
+    overall_rms_val, per_rms_val, residuals_val = (0.0, [], []) if len(obj_val)==0 else compute_reprojection_stats(K_est, dist_est, obj_val, img_val)
+    rms_grid_val, counts_grid_val = (np.zeros((bins_y, bins_x)), np.zeros((bins_y, bins_x), dtype=np.int32)) if len(obj_val)==0 else compute_spatial_heatmap(used_val, img_val, residuals_val, bins_x, bins_y)
+
+    val_dir = os.path.join(bundle_dir, 'val')
+    ensure_dir(val_dir)
+    print('\nVisualizing residuals (val) to', val_dir)
+    if len(obj_val) > 0:
+        visualize_residuals(used_val, img_val, residuals_val, val_dir, show=args.show_vis, arrow_scale=args.arrow_scale)
+    heat_val = os.path.join(val_dir, 'rms_heatmap.png')
+    visualize_heatmap(rms_grid_val, counts_grid_val, heat_val, title=f'Val RMS heatmap ({bins_x}x{bins_y})')
+    eval_files_val = [] if len(obj_val)==0 else [os.path.join(val_dir, os.path.basename(p)) for p in used_val]
+    eval_files_val.append(heat_val)
+    if args.per_image_heatmap and len(obj_val)>0:
+        for path, pts, residual in zip(used_val, img_val, residuals_val):
+            rms_i, counts_i = compute_spatial_heatmap([path], [pts], [residual], bins_x, bins_y)
+            fname = os.path.splitext(os.path.basename(path))[0]
+            out_i = os.path.join(val_dir, f'{fname}_heatmap.png')
+            visualize_heatmap(rms_i, counts_i, out_i, title=f'Val RMS {fname}')
+            eval_files_val.append(out_i)
 
 
-    # 4) 综合 JSON 输出
+    # 5) 综合 JSON 输出（根目录 + 子目录）
     combined = {
         'timestamp': timestamp,
         'opencv_version': opencv_version,
-        'mode': 'all',
         'images_glob': args.images,
         'matched_image_count': len(images),
         'pattern': [pattern[0], pattern[1]],
         'square': float(args.square),
         'use_ransac': bool(args.use_ransac),
+        'split': {
+            'val_ratio': float(val_ratio),
+            'seed': int(args.split_seed),
+            'counts': {'total': n_total, 'train': len(train_images), 'val': len(val_images)}
+        },
         'calibrate': {
             'used_image_count': len(calib_res['used_images']),
             'used_images': calib_res['used_images'],
@@ -287,15 +355,29 @@ def cmd_all(args):
             'dist': calib_res['dist'].tolist(),
             'calibrate_rms': float(calib_res.get('rms', float('nan')))
         },
-        'evaluate': {
-            'overall_reprojection_rms_px': float(overall_rms),
-            'per_image_rms_px': per_rms,
+        'train_evaluate': {
+            'used_image_count': len(used_tr),
+            'used_images': used_tr,
+            'overall_reprojection_rms_px': float(overall_rms_tr),
+            'per_image_rms_px': per_rms_tr,
             'spatial_distribution': {
-                'rms_grid': rms_grid.tolist(),
-                'counts_grid': counts_grid.tolist()
+                'rms_grid': rms_grid_tr.tolist(),
+                'counts_grid': counts_grid_tr.tolist()
             },
-            'visualization_dir': bundle_dir,
-            'visualization_files': eval_files
+            'visualization_dir': train_dir,
+            'visualization_files': eval_files_tr
+        },
+        'val_evaluate': {
+            'used_image_count': len(used_val),
+            'used_images': used_val,
+            'overall_reprojection_rms_px': float(overall_rms_val),
+            'per_image_rms_px': per_rms_val,
+            'spatial_distribution': {
+                'rms_grid': rms_grid_val.tolist(),
+                'counts_grid': counts_grid_val.tolist()
+            },
+            'visualization_dir': val_dir,
+            'visualization_files': eval_files_val
         },
     }
     out_json = os.path.join(bundle_dir, 'results_all.json')
@@ -303,6 +385,22 @@ def cmd_all(args):
         json.dump(combined, f, ensure_ascii=False, indent=2)
     print('\n[All] Bundle saved to', bundle_dir)
     print('[All] JSON:', out_json)
+
+    # 写子目录 JSON
+    train_json = {
+        'subset': 'train',
+        'images': train_images,
+        'evaluate': combined['train_evaluate']
+    }
+    with open(os.path.join(train_dir, 'results_train.json'), 'w', encoding='utf-8') as f:
+        json.dump(train_json, f, ensure_ascii=False, indent=2)
+    val_json = {
+        'subset': 'val',
+        'images': val_images,
+        'evaluate': combined['val_evaluate']
+    }
+    with open(os.path.join(val_dir, 'results_val.json'), 'w', encoding='utf-8') as f:
+        json.dump(val_json, f, ensure_ascii=False, indent=2)
     return 0
 
 
