@@ -1,19 +1,10 @@
-"""Zhang 相机标定命令行工具 (calibrate_cli)
+"""统一相机标定与评估 CLI（仅保留 all 模式）
 
-功能概述：
-- 读取一批棋盘格标定图片（支持 glob 通配符）
-- 运行：角点检测 -> 单应估计 (可选 RANSAC) -> Zhang 线性内参初值 -> OpenCV 联合优化
-- 输出：初始/优化内参矩阵、径向畸变系数、使用的图片数量、整体重投影 RMS
+模式（--mode）：
+- all : 在一次运行中依次执行 calibrate + evaluate，并统一打包输出
 
-重要说明：
-1. pattern 参数是棋盘“内角点”数量 (cols rows)，与生成脚本保持一致。
-2. square 是棋盘格物理尺寸（单位任意，影响外参尺度，不影响像素 RMS）。
-3. 默认更稳健：固定 skew、固定 k3、切向畸变置零、主点可调。
-4. 若视图少或角点检测失败会导致初值不稳，重投影误差大。
-5. 可用 evaluate_intrinsics.py + visualize_corners.py 做误差和角点质量诊断。
-
-典型使用：
-python scripts/calibrate_cli.py --images 'images/calib/*.png' --pattern 9 6 --square 0.029 --use-ransac
+示例：
+python scripts/calibrate_cli.py --mode all --images 'images/calib/*.png' --pattern 9 6 --square 0.029 --bundle run_all
 """
 
 import argparse
@@ -22,225 +13,305 @@ import sys
 import os
 import datetime
 import json
+from typing import Optional
 
 # 确保项目根加入 sys.path（支持从任意工作目录调用脚本）
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
-from calib import calibrate_from_images
+import numpy as np
+import cv2
+
+from calib.calibrate import calibrate_from_images, detect_corners
 
 
 def build_flags(args):
-    """根据命令行开关与当前 OpenCV 版本安全构造标定 flags。
-    安全策略：
-    - 缺失的常量忽略，不抛异常
-    - 默认使用 CALIB_USE_INTRINSIC_GUESS
-    - 固定 skew（除非 --free-skew）
-    - 切向畸变置零（除非 --free-tangential）
-    - 固定 k3（除非 --enable-k3）
-    - 固定主点（仅在传 --fix-principal-point 且版本支持）
-    """
-    import cv2
+    """根据命令行开关与当前 OpenCV 版本安全构造标定 flags。"""
+    if cv2 is None:
+        return 0
     flags = getattr(cv2, 'CALIB_USE_INTRINSIC_GUESS', 0)
-    if not args.free_skew and hasattr(cv2, 'CALIB_FIX_SKEW'):
+    if getattr(args, 'free_skew', False) and hasattr(cv2, 'CALIB_FIX_SKEW') is False:
+        # nothing to do if API missing; keep default
+        pass
+    elif not getattr(args, 'free_skew', False) and hasattr(cv2, 'CALIB_FIX_SKEW'):
         flags |= getattr(cv2, 'CALIB_FIX_SKEW')
-    if not args.free_tangential:
+    if not getattr(args, 'free_tangential', False):
         if hasattr(cv2, 'CALIB_ZERO_TANGENT_DIST'):
             flags |= getattr(cv2, 'CALIB_ZERO_TANGENT_DIST')
         elif hasattr(cv2, 'CALIB_FIX_TANGENT_DIST'):
             flags |= getattr(cv2, 'CALIB_FIX_TANGENT_DIST')
-    if not args.enable_k3 and hasattr(cv2, 'CALIB_FIX_K3'):
+    if not getattr(args, 'enable_k3', False) and hasattr(cv2, 'CALIB_FIX_K3'):
         flags |= getattr(cv2, 'CALIB_FIX_K3')
-    if args.fix_principal_point and hasattr(cv2, 'CALIB_FIX_PRINCIPAL_POINT'):
+    if getattr(args, 'fix_principal_point', False) and hasattr(cv2, 'CALIB_FIX_PRINCIPAL_POINT'):
         flags |= getattr(cv2, 'CALIB_FIX_PRINCIPAL_POINT')
     return flags
 
 
-def parse_args():
-    """解析命令行参数并返回命名空间."""
-    parser = argparse.ArgumentParser(
-        description='Zhang 相机标定 CLI（支持 RANSAC 与多自由度对比实验）',
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter
-    )
-    parser.add_argument('--images', required=True,
-                        help='标定图片 glob 通配符，例如 /path/to/*.jpg')
-    parser.add_argument('--pattern', nargs=2, required=True, type=int,
-                        help='棋盘格内角点数：cols rows（例：9 6）')
-    parser.add_argument('--square', required=True, type=float,
-                        help='棋盘格单元物理尺寸（任意单位，如 0.029）')
-    parser.add_argument('--use-ransac', action='store_true',
-                        help='单应估计使用 RANSAC（提高鲁棒性）')
+def build_parser():
+    parser = argparse.ArgumentParser(description='统一相机标定/评估 CLI（仅 all 模式）', formatter_class=argparse.ArgumentDefaultsHelpFormatter)
 
-    # 自由度控制
-    parser.add_argument('--free-skew', action='store_true',
-                        help='允许估计 skew（大多相机不推荐，默认固定为 0）')
-    parser.add_argument('--free-tangential', action='store_true',
-                        help='允许切向畸变 p1/p2（默认置零）')
-    parser.add_argument('--enable-k3', action='store_true',
-                        help='允许三阶径向畸变 k3（默认固定为 0）')
-    parser.add_argument('--fix-principal-point', action='store_true',
-                        help='固定主点（图像中心附近），默认不固定')
+    # 基础参数
+    parser.add_argument('--images', default=None, help='图片 glob 通配符，例如 /path/to/*.jpg；请使用引号避免 shell 展开')
+    parser.add_argument('--image', dest='images', help='同 --images 的别名；建议用引号包裹通配符')
+    parser.add_argument('--pattern', nargs=2, type=int, default=None, help='棋盘格内角点数：cols rows（例：9 6）')
+    parser.add_argument('--square', type=float, default=None, help='棋盘格单元物理尺寸（任意单位，如 0.029）')
+    
+    # 标定选项
+    parser.add_argument('--use-ransac', action='store_true', help='单应估计使用 RANSAC（提高鲁棒性）')
+    parser.add_argument('--free-skew', action='store_true', help='允许估计 skew（默认固定为 0）')
+    parser.add_argument('--free-tangential', action='store_true', help='允许切向畸变 p1/p2（默认置零）')
+    parser.add_argument('--enable-k3', action='store_true', help='允许三阶径向畸变 k3（默认固定为 0）')
+    parser.add_argument('--fix-principal-point', action='store_true', help='固定主点（图像中心附近），默认不固定')
+    parser.add_argument('--iter', type=int, default=100, help='联合优化最大迭代次数')
+    parser.add_argument('--eps', type=float, default=1e-6, help='联合优化收敛阈值')
 
-    # 迭代与收敛
-    parser.add_argument('--iter', type=int, default=100,
-                        help='联合优化最大迭代次数')
-    parser.add_argument('--eps', type=float, default=1e-6,
-                        help='联合优化收敛阈值 (criteria epsilon)')
+    # 评估/可视化选项
+    parser.add_argument('--show-vis', action='store_true', help='在屏幕上显示可视化图像')
+    parser.add_argument('--arrow-scale', type=float, default=1.0, help='重投影向量的缩放系数')
+    parser.add_argument('--grid', nargs=2, type=int, default=[10, 8], help='空间误差统计网格大小（列 行），用于聚合所有图的误差分布')
+    parser.add_argument('--per-image-heatmap', action='store_true', help='同时输出每张图片的误差热力图（输出到 bundle 目录）')
+    parser.add_argument('--bundle', type=str, default=None, help='将输出统一打包到项目根 out/<name>/ 下（单一 JSON + 所有图片）')
 
-    # 日志输出
-    parser.add_argument('--log-json', type=str, default=None,
-                        help="将本次实验条件与标定结果保存为 JSON（提供路径，或 '-' 输出到标准输出）")
-
-    return parser.parse_args()
+    return parser
 
 
-def main():
-    args = parse_args()
+def ensure_dir(p: str):
+    if not os.path.exists(p):
+        os.makedirs(p, exist_ok=True)
 
-    # 解析图片列表
+
+def compute_reprojection_stats(K: np.ndarray, dist: np.ndarray, objpoints, imgpoints):
+    """返回 (overall_rms, per_image_rms list, residuals list)。residual = observed - projected"""
+    per_rms, residuals, all_sq = [], [], []
+    dist_full = np.array([dist[0], dist[1], 0.0, 0.0, 0.0], dtype=float)
+    for objp, imgp in zip(objpoints, imgpoints):
+        ok, rvec, tvec = cv2.solvePnP(objp, imgp, K, dist_full, flags=cv2.SOLVEPNP_ITERATIVE)
+        if not ok:
+            rvec = np.zeros((3,1), dtype=float)
+            tvec = np.zeros((3,1), dtype=float)
+        proj, _ = cv2.projectPoints(objp, rvec, tvec, K, dist_full)
+        proj = proj.reshape(-1, 2)
+        res = imgp - proj
+        residuals.append(res)
+        sq = (res ** 2).sum(axis=1)
+        all_sq.extend(sq.tolist())
+        per_rms.append(float(np.sqrt(sq.mean())))
+    overall = float(np.sqrt(np.mean(all_sq))) if len(all_sq) else 0.0
+    return overall, per_rms, residuals
+
+
+def visualize_residuals(used_images, imgpoints_list, residuals_list, out_dir: str, show: bool = False, arrow_scale: float = 1.0):
+    ensure_dir(out_dir)
+    mags_all = [np.linalg.norm(r, axis=1) for r in residuals_list]
+    max_mag = max([m.max() if m.size else 0.0 for m in mags_all]) if mags_all else 0.0
+    max_mag = max(max_mag, 1e-6)
+    for path, imgp, res in zip(used_images, imgpoints_list, residuals_list):
+        img = cv2.imread(path)
+        if img is None:
+            print(f'warning: cannot read {path}')
+            continue
+        vis = img.copy()
+        mags = np.linalg.norm(res, axis=1)
+        for (pt, r, mag) in zip(imgp, res, mags):
+            px, py = int(round(pt[0])), int(round(pt[1]))
+            proj_x, proj_y = int(round(px - r[0])), int(round(py - r[1]))
+            t = min(1.0, mag / max_mag)
+            color = (int(255 * t), 0, int(255 * (1 - t)))
+            cv2.circle(vis, (proj_x, proj_y), 3, (255,255,255), -1)
+            cv2.circle(vis, (px, py), 3, (0,255,0), -1)
+            end_x = int(round(proj_x + r[0] * arrow_scale))
+            end_y = int(round(proj_y + r[1] * arrow_scale))
+            cv2.arrowedLine(vis, (proj_x, proj_y), (end_x, end_y), color, 1, tipLength=0.3)
+        overall_rms_img = float(np.sqrt((mags ** 2).mean())) if mags.size>0 else 0.0
+        cv2.putText(vis, f'RMS(px): {overall_rms_img:.3f}', (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0,0,255), 2)
+        out_path = os.path.join(out_dir, os.path.basename(path))
+        cv2.imwrite(out_path, vis)
+        if show:
+            cv2.imshow('reproj', vis)
+            k = cv2.waitKey(0) & 0xFF
+            if k == ord('q'):
+                break
+    if show:
+        cv2.destroyAllWindows()
+
+
+def load_gt_K(path: str) -> Optional[np.ndarray]:
+    if path is None:
+        return None
+    if path.endswith('.npy'):
+        return np.load(path)
+    with open(path, 'r') as f:
+        j = json.load(f)
+    if isinstance(j, list):
+        return np.array(j, dtype=float)
+    if isinstance(j, dict):
+        fx = float(j.get('fx', 0.0)); fy = float(j.get('fy', 0.0))
+        cx = float(j.get('cx', 0.0)); cy = float(j.get('cy', 0.0))
+        skew = float(j.get('skew', 0.0))
+        K = np.array([[fx, skew, cx], [0.0, fy, cy], [0.0, 0.0, 1.0]], dtype=float)
+        return K
+    return None
+
+
+# ------------- 空间误差分布与可视化 -------------
+def compute_spatial_heatmap(used_images, imgpoints_list, residuals_list, bins_x: int, bins_y: int):
+    """聚合所有图片的重投影误差，计算在归一化图像坐标上的空间 RMS 分布。
+
+    对每个有效角点，计算 residual 的幅值 mag，归一化坐标 (x/w, y/h) 落入网格，累计 mag^2 与计数。
+    返回：rms_grid (bins_y, bins_x)、counts (bins_y, bins_x)
+    """
+    bins_x = max(1, int(bins_x)); bins_y = max(1, int(bins_y))
+    sum_sq = np.zeros((bins_y, bins_x), dtype=np.float64)
+    counts = np.zeros((bins_y, bins_x), dtype=np.int32)
+    for path, imgp, res in zip(used_images, imgpoints_list, residuals_list):
+        img = cv2.imread(path)
+        if img is None:
+            continue
+        h, w = img.shape[:2]
+        mags = np.linalg.norm(res, axis=1)
+        xs = imgp[:, 0] / max(w, 1)
+        ys = imgp[:, 1] / max(h, 1)
+        gx = np.clip((xs * bins_x).astype(np.int32), 0, bins_x - 1)
+        gy = np.clip((ys * bins_y).astype(np.int32), 0, bins_y - 1)
+        for xbin, ybin, m in zip(gx, gy, mags):
+            sum_sq[ybin, xbin] += float(m * m)
+            counts[ybin, xbin] += 1
+    rms = np.zeros_like(sum_sq, dtype=np.float64)
+    nonzero = counts > 0
+    rms[nonzero] = np.sqrt(sum_sq[nonzero] / counts[nonzero])
+    return rms, counts
+
+
+def visualize_heatmap(rms_grid: np.ndarray, counts: np.ndarray, out_path: str, title: str = 'RMS heatmap'):
+    """将 RMS 网格可视化为色图 PNG。零计数的网格用黑色显示。"""
+    ensure_dir(os.path.dirname(out_path))
+    hbins, wbins = rms_grid.shape
+    vmax = float(np.max(rms_grid))
+    vmin = float(np.min(rms_grid[counts > 0])) if np.any(counts > 0) else 0.0
+    denom = max(vmax - vmin, 1e-12)
+    norm = np.zeros_like(rms_grid, dtype=np.float32)
+    if denom > 0:
+        norm[counts > 0] = (rms_grid[counts > 0] - vmin) / denom
+    img_small = (norm * 255.0).astype(np.uint8)
+    scale = 40  # 每格像素大小
+    heat = cv2.resize(img_small, (wbins * scale, hbins * scale), interpolation=cv2.INTER_NEAREST)
+    heat = cv2.applyColorMap(heat, cv2.COLORMAP_JET)
+    counts_big = cv2.resize((counts > 0).astype(np.uint8), (wbins * scale, hbins * scale), interpolation=cv2.INTER_NEAREST)
+    mask_zero = counts_big == 0
+    heat[mask_zero] = (0, 0, 0)
+    cv2.putText(heat, title, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255,255,255), 2)
+    cv2.putText(heat, f'RMS range:[{vmin:.2f}, {vmax:.2f}] px', (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255,255,255), 2)
+    cv2.imwrite(out_path, heat)
+
+
+# ---------------------- 单一模式实现（all） ----------------------
+def cmd_all(args):
+    # 1) 校验与准备
+    if not args.images:
+        print('all 模式需要提供 --images')
+        return 1
+    if args.pattern is None or args.square is None:
+        print('缺少必需参数：--pattern 与 --square')
+        return 1
     images = glob.glob(args.images)
     if not images:
         print('未找到匹配的图片：', args.images)
-        return
-
+        return 1
     pattern = (args.pattern[0], args.pattern[1])
     flags = build_flags(args)
-
-    # ===== 实验条件日志（标定前） =====
-    import cv2
-    opencv_version = cv2.__version__
-    def decode_flags(f):
-        names = []
-        candidates = [
-            'CALIB_USE_INTRINSIC_GUESS', 'CALIB_FIX_SKEW', 'CALIB_ZERO_TANGENT_DIST',
-            'CALIB_FIX_TANGENT_DIST', 'CALIB_FIX_K3', 'CALIB_FIX_PRINCIPAL_POINT'
-        ]
-        for n in candidates:
-            if hasattr(cv2, n):
-                val = getattr(cv2, n)
-                if f & val:
-                    names.append(n)
-        return names
-    flag_names = decode_flags(flags)
+    criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, int(args.iter), float(args.eps))
     timestamp = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    print('\n=== 标定实验条件 ===')
-    print(f'Time: {timestamp}')
-    print(f'OpenCV version: {opencv_version}')
-    print(f'Images glob: {args.images}')
-    print(f'Matched image count: {len(images)}')
-    print(f'Pattern (cols x rows): {pattern[0]} x {pattern[1]} (total corners: {pattern[0]*pattern[1]})')
-    print(f'Square size (physical units): {args.square}')
-    print(f'Use RANSAC: {args.use_ransac}')
-    print(f'Free skew: {args.free_skew}')
-    print(f'Free tangential: {args.free_tangential}')
-    print(f'Enable k3: {args.enable_k3}')
-    print(f'Fix principal point: {args.fix_principal_point}')
-    print(f'Max iterations (criteria): {args.iter}')
-    print(f'Epsilon (criteria): {args.eps}')
-    print('Resolved OpenCV flags:', ', '.join(flag_names) if flag_names else '(none / unsupported)')
-    print('================================')
+    opencv_version = cv2.__version__ if cv2 is not None else 'N/A'
 
-    # 构造终止条件
-    criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER,
-                int(args.iter),
-                float(args.eps))
+    # 统一打包目录
+    if not args.bundle:
+        print('提示：all 模式建议提供 --bundle 名称，用于统一输出到 out/<name>/')
+    bundle_dir = os.path.abspath(os.path.join(ROOT, 'out', args.bundle or 'run_all'))
+    ensure_dir(bundle_dir)
 
-    # 调用整体标定
+    # 2) calibrate
+    print('\n=== [1/2] Calibrate ===')
     try:
-        res = calibrate_from_images(
-            images,
-            pattern,
-            args.square,
-            use_ransac=args.use_ransac,
-            calib_flags=flags,
-            criteria=criteria
-        )
+        calib_res = calibrate_from_images(images, pattern, args.square, use_ransac=args.use_ransac, calib_flags=flags, criteria=criteria)
     except Exception as e:
         print('标定失败：', repr(e))
-        return
+        return 2
+    print('使用图片数量：', len(calib_res['used_images']))
+    print('K (优化)：\n', calib_res['K'])
+    print('dist (k1,k2)：', calib_res['dist'])
+    print('训练/总体 RMS (calibrateCamera)：', calib_res.get('rms', 'N/A'))
 
-    # 输出结果
-    print('\n=== 标定结果 ===')
-    print('图片数量（匹配到）：', len(images))
-    print('成功使用图片数量：', len(res['used_images']))
-    # 打印使用的图片（过长时截断）
-    MAX_LIST = 10
-    used_list = res['used_images']
-    if len(used_list) <= MAX_LIST:
-        print('Used images:')
-        for p in used_list:
-            print('  -', p)
-    else:
-        print(f'Used images (first {MAX_LIST}/{len(used_list)}):')
-        for p in used_list[:MAX_LIST]:
-            print('  -', p)
-        print('  ... (truncated)')
-    # 记录实验条件快照（便于日志对比）
-    print('\n=== 条件快照复核 ===')
-    print(f'RANSAC={args.use_ransac}, skew_free={args.free_skew}, tangential_free={args.free_tangential}, k3_enabled={args.enable_k3}, fix_pp={args.fix_principal_point}')
-    print('Flags decoded:', ', '.join(flag_names) if flag_names else '(none)')
-    print('================================')
-    print('K (初始)：\n', res['K_init'])
-    print('K (优化)：\n', res['K'])
-    print('dist (k1,k2)：', res['dist'])
-    print('整体重投影 RMS (px)：', res.get('rms', 'N/A'))
-    # 给出简单合理性提示
-    fx, fy = res['K'][0, 0], res['K'][1, 1]
-    skew = res['K'][0, 1]
-    cx, cy = res['K'][0, 2], res['K'][1, 2]
-    print(f'焦距 fx, fy：{fx:.2f}, {fy:.2f} | skew：{skew:.4f} | 主点 (cx, cy)：({cx:.2f}, {cy:.2f})')
-    if abs(skew) > 1e-3:
-        print('提示：skew 非常规接近 0，若无需 skew 请移除 --free-skew 开关。')
-    if res.get('rms', 1e9) > 2.0:
-        print('警告：RMS > 2 像素，检查角点检测质量、视角多样性，或启用 --use-ransac。')
+    # 3) evaluate
+    print('\n=== [2/2] Evaluate ===')
+    objpoints, imgpoints, used = detect_corners(images, pattern, args.square)
+    if len(objpoints) < 3:
+        print('至少需要 3 张成功检测到角点的图片进行可靠评估（当前: %d）' % len(objpoints))
+        return 2
+    K_est, dist_est = calib_res['K'], calib_res['dist']
+    overall_rms, per_rms, residuals = compute_reprojection_stats(K_est, dist_est, objpoints, imgpoints)
+    bins_x, bins_y = int(args.grid[0]), int(args.grid[1])
+    rms_grid, counts_grid = compute_spatial_heatmap(used, imgpoints, residuals, bins_x, bins_y)
+    # 评估可视化输出到 bundle_dir
+    vis_out_dir = os.path.abspath(bundle_dir)
+    print('\nVisualizing residuals to', vis_out_dir)
+    visualize_residuals(used, imgpoints, residuals, vis_out_dir, show=args.show_vis, arrow_scale=args.arrow_scale)
+    heat_out = os.path.join(vis_out_dir, 'rms_heatmap.png')
+    visualize_heatmap(rms_grid, counts_grid, heat_out, title=f'RMS heatmap ({bins_x}x{bins_y})')
+    eval_files = [os.path.join(vis_out_dir, os.path.basename(p)) for p in used]
+    eval_files.append(heat_out)
+    if args.per_image_heatmap:
+        for path, pts, residual in zip(used, imgpoints, residuals):
+            rms_i, counts_i = compute_spatial_heatmap([path], [pts], [residual], bins_x, bins_y)
+            fname = os.path.splitext(os.path.basename(path))[0]
+            out_i = os.path.join(vis_out_dir, f'{fname}_heatmap.png')
+            visualize_heatmap(rms_i, counts_i, out_i, title=f'RMS heatmap {fname}')
+            eval_files.append(out_i)
 
-    print('\n可下一步运行 evaluate_intrinsics.py 进行误差可视化。')
 
-    # ===== 结构化 JSON 日志输出 =====
-    if args.log_json:
-        log = {
-            'timestamp': timestamp,
-            'opencv_version': opencv_version,
-            'images_glob': args.images,
-            'matched_image_count': len(images),
-            'used_image_count': len(res['used_images']),
-            'used_images': res['used_images'],
-            'pattern': [pattern[0], pattern[1]],
-            'square': args.square,
-            'use_ransac': bool(args.use_ransac),
-            'free_skew': bool(args.free_skew),
-            'free_tangential': bool(args.free_tangential),
-            'enable_k3': bool(args.enable_k3),
-            'fix_principal_point': bool(args.fix_principal_point),
-            'criteria': {
-                'type': 'EPS+MAX_ITER',
-                'max_iter': int(args.iter),
-                'epsilon': float(args.eps)
+    # 4) 综合 JSON 输出
+    combined = {
+        'timestamp': timestamp,
+        'opencv_version': opencv_version,
+        'mode': 'all',
+        'images_glob': args.images,
+        'matched_image_count': len(images),
+        'pattern': [pattern[0], pattern[1]],
+        'square': float(args.square),
+        'use_ransac': bool(args.use_ransac),
+        'calibrate': {
+            'used_image_count': len(calib_res['used_images']),
+            'used_images': calib_res['used_images'],
+            'K_init': calib_res['K_init'].tolist(),
+            'K': calib_res['K'].tolist(),
+            'dist': calib_res['dist'].tolist(),
+            'calibrate_rms': float(calib_res.get('rms', float('nan')))
+        },
+        'evaluate': {
+            'overall_reprojection_rms_px': float(overall_rms),
+            'per_image_rms_px': per_rms,
+            'spatial_distribution': {
+                'rms_grid': rms_grid.tolist(),
+                'counts_grid': counts_grid.tolist()
             },
-            'opencv_flags': {
-                'names': flag_names,
-                'value': int(flags)
-            },
-            'results': {
-                'K_init': res['K_init'].tolist() if hasattr(res['K_init'], 'tolist') else res['K_init'],
-                'K': res['K'].tolist() if hasattr(res['K'], 'tolist') else res['K'],
-                'dist': res['dist'].tolist() if hasattr(res['dist'], 'tolist') else res['dist'],
-                'rms': float(res.get('rms', float('nan')))
-            }
-        }
-        try:
-            if args.log_json.strip() == '-':
-                print('\n=== JSON LOG ===')
-                print(json.dumps(log, ensure_ascii=False, indent=2))
-            else:
-                out_path = os.path.abspath(args.log_json)
-                os.makedirs(os.path.dirname(out_path), exist_ok=True)
-                with open(out_path, 'w', encoding='utf-8') as f:
-                    json.dump(log, f, ensure_ascii=False, indent=2)
-                print('JSON log saved to', out_path)
-        except Exception as e:
-            print('写入 JSON 日志失败：', repr(e))
+            'visualization_dir': bundle_dir,
+            'visualization_files': eval_files
+        },
+    }
+    out_json = os.path.join(bundle_dir, 'results_all.json')
+    with open(out_json, 'w', encoding='utf-8') as f:
+        json.dump(combined, f, ensure_ascii=False, indent=2)
+    print('\n[All] Bundle saved to', bundle_dir)
+    print('[All] JSON:', out_json)
+    return 0
+
+
+
+def main():
+    parser = build_parser()
+    args = parser.parse_args()
+    code = cmd_all(args)
+    sys.exit(code)
 
 
 if __name__ == '__main__':

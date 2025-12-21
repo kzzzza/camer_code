@@ -1,0 +1,956 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>相机标定完整指南：世界坐标、像素坐标与标定板移动的影响</title>
+    <style>
+        :root {
+            --primary: #3498db;
+            --secondary: #2c3e50;
+            --success: #2ecc71;
+            --warning: #f39c12;
+            --danger: #e74c3c;
+            --light: #ecf0f1;
+            --dark: #34495e;
+        }
+        
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+        
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            line-height: 1.6;
+            color: #333;
+            background-color: #f8f9fa;
+            padding: 20px;
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+        
+        header {
+            text-align: center;
+            margin-bottom: 30px;
+            padding: 20px;
+            background: linear-gradient(135deg, var(--primary), var(--secondary));
+            color: white;
+            border-radius: 10px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+        }
+        
+        h1 {
+            margin-bottom: 10px;
+        }
+        
+        .description {
+            font-size: 1.1em;
+            opacity: 0.9;
+        }
+        
+        .section {
+            background-color: white;
+            border-radius: 10px;
+            padding: 25px;
+            margin-bottom: 30px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.05);
+        }
+        
+        .section-title {
+            color: var(--secondary);
+            border-bottom: 2px solid var(--primary);
+            padding-bottom: 10px;
+            margin-bottom: 20px;
+            display: flex;
+            align-items: center;
+        }
+        
+        .section-icon {
+            font-size: 1.5em;
+            margin-right: 10px;
+        }
+        
+        .math-equation {
+            background-color: #f8f9fa;
+            border-left: 4px solid var(--primary);
+            padding: 15px;
+            margin: 15px 0;
+            font-family: 'Cambria Math', 'Times New Roman', serif;
+            overflow-x: auto;
+            border-radius: 0 8px 8px 0;
+        }
+        
+        .coordinate-system {
+            display: flex;
+            justify-content: space-around;
+            flex-wrap: wrap;
+            gap: 20px;
+            margin: 20px 0;
+        }
+        
+        .coord-system {
+            flex: 1;
+            min-width: 300px;
+            background-color: white;
+            border-radius: 8px;
+            padding: 20px;
+            box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+            border-top: 4px solid var(--primary);
+        }
+        
+        .coord-title {
+            font-weight: bold;
+            margin-bottom: 15px;
+            color: var(--secondary);
+            text-align: center;
+        }
+        
+        .coord-visual {
+            height: 200px;
+            background-color: #f8f9fa;
+            border-radius: 5px;
+            margin: 15px 0;
+            position: relative;
+            border: 1px solid #ddd;
+        }
+        
+        .world-coord-visual {
+            background: linear-gradient(45deg, #e3f2fd, #bbdefb);
+        }
+        
+        .pixel-coord-visual {
+            background: linear-gradient(45deg, #e8f5e9, #c8e6c9);
+        }
+        
+        .axis {
+            position: absolute;
+            font-weight: bold;
+        }
+        
+        .x-axis {
+            bottom: 10px;
+            left: 50%;
+            transform: translateX(-50%);
+            color: var(--danger);
+        }
+        
+        .y-axis {
+            left: 10px;
+            top: 50%;
+            transform: translateY(-50%) rotate(-90deg);
+            color: var(--success);
+        }
+        
+        .z-axis {
+            right: 10px;
+            top: 10px;
+            color: var(--primary);
+        }
+        
+        .origin {
+            position: absolute;
+            bottom: 30px;
+            left: 30px;
+            width: 8px;
+            height: 8px;
+            background-color: var(--dark);
+            border-radius: 50%;
+        }
+        
+        .grid-lines {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background-image: 
+                linear-gradient(rgba(0,0,0,0.1) 1px, transparent 1px),
+                linear-gradient(90deg, rgba(0,0,0,0.1) 1px, transparent 1px);
+            background-size: 20px 20px;
+        }
+        
+        .corner-point {
+            position: absolute;
+            width: 12px;
+            height: 12px;
+            background-color: var(--warning);
+            border-radius: 50%;
+            transform: translate(-50%, -50%);
+            border: 2px solid white;
+            box-shadow: 0 0 3px rgba(0,0,0,0.5);
+        }
+        
+        .point-label {
+            position: absolute;
+            font-size: 0.8em;
+            background-color: white;
+            padding: 2px 5px;
+            border-radius: 3px;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.2);
+        }
+        
+        .step {
+            margin-bottom: 20px;
+            padding: 15px;
+            background-color: #f0f7ff;
+            border-radius: 5px;
+            position: relative;
+        }
+        
+        .step-number {
+            position: absolute;
+            top: -10px;
+            left: -10px;
+            width: 30px;
+            height: 30px;
+            background-color: var(--primary);
+            color: white;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: bold;
+        }
+        
+        .step-title {
+            font-weight: bold;
+            margin-bottom: 10px;
+            color: var(--secondary);
+        }
+        
+        .code-example {
+            background-color: #2c3e50;
+            color: white;
+            border-radius: 8px;
+            padding: 20px;
+            margin: 20px 0;
+            overflow-x: auto;
+            font-family: Consolas, monospace;
+        }
+        
+        .code-keyword {
+            color: #3498db;
+        }
+        
+        .code-comment {
+            color: #7f8c8d;
+        }
+        
+        .code-string {
+            color: #2ecc71;
+        }
+        
+        .parameter-explanation {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 20px;
+            margin: 20px 0;
+        }
+        
+        .parameter-card {
+            background-color: white;
+            border-radius: 8px;
+            padding: 20px;
+            box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+            border-top: 4px solid var(--primary);
+        }
+        
+        .parameter-title {
+            font-weight: bold;
+            margin-bottom: 10px;
+            color: var(--secondary);
+            display: flex;
+            align-items: center;
+        }
+        
+        .parameter-icon {
+            margin-right: 10px;
+            width: 30px;
+            height: 30px;
+            background-color: var(--primary);
+            color: white;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: bold;
+        }
+        
+        .intrinsic .parameter-icon {
+            background-color: var(--primary);
+        }
+        
+        .extrinsic .parameter-icon {
+            background-color: var(--success);
+        }
+        
+        .comparison-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 20px 0;
+            box-shadow: 0 2px 5px rgba(0,0,0,0.05);
+        }
+        
+        .comparison-table th, .comparison-table td {
+            border: 1px solid #ddd;
+            padding: 12px 15px;
+            text-align: left;
+        }
+        
+        .comparison-table th {
+            background-color: #f2f2f2;
+            font-weight: bold;
+            color: var(--secondary);
+        }
+        
+        .comparison-table tr:nth-child(even) {
+            background-color: #f9f9f9;
+        }
+        
+        .visual-explanation {
+            display: flex;
+            justify-content: space-around;
+            flex-wrap: wrap;
+            gap: 20px;
+            margin: 30px 0;
+        }
+        
+        .visual-item {
+            flex: 1;
+            min-width: 300px;
+            padding: 20px;
+            background-color: white;
+            border-radius: 8px;
+            box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+        }
+        
+        .visual-title {
+            font-weight: bold;
+            margin-bottom: 15px;
+            color: var(--secondary);
+            text-align: center;
+        }
+        
+        .camera-setup {
+            height: 250px;
+            background-color: #f8f9fa;
+            border-radius: 5px;
+            margin: 15px 0;
+            position: relative;
+            border: 1px solid #ddd;
+            overflow: hidden;
+        }
+        
+        .camera {
+            position: absolute;
+            bottom: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            width: 60px;
+            height: 40px;
+            background-color: #333;
+            border-radius: 5px;
+        }
+        
+        .camera-lens {
+            position: absolute;
+            top: 10px;
+            left: 50%;
+            transform: translateX(-50%);
+            width: 20px;
+            height: 20px;
+            background-color: #3498db;
+            border-radius: 50%;
+        }
+        
+        .chessboard {
+            position: absolute;
+            width: 80px;
+            height: 60px;
+            background-color: #fff;
+            background-image: 
+                linear-gradient(45deg, #ccc 25%, transparent 25%), 
+                linear-gradient(-45deg, #ccc 25%, transparent 25%), 
+                linear-gradient(45deg, transparent 75%, #ccc 75%), 
+                linear-gradient(-45deg, transparent 75%, #ccc 75%);
+            background-size: 20px 20px;
+            background-position: 0 0, 0 10px, 10px -10px, -10px 0px;
+            transition: all 1s ease;
+        }
+        
+        .coordinate-system-label {
+            position: absolute;
+            font-size: 0.8em;
+        }
+        
+        .world-coord-label {
+            top: 10px;
+            left: 10px;
+            color: var(--success);
+        }
+        
+        .camera-coord-label {
+            bottom: 70px;
+            right: 10px;
+            color: var(--primary);
+        }
+        
+        .correct-answer {
+            background-color: #e8f5e9;
+            border-left: 4px solid var(--success);
+            padding: 20px;
+            margin: 20px 0;
+            border-radius: 0 8px 8px 0;
+        }
+        
+        .correct-icon {
+            color: var(--success);
+            font-weight: bold;
+            font-size: 1.2em;
+        }
+        
+        .step-by-step {
+            background-color: #e3f2fd;
+            border-radius: 8px;
+            padding: 20px;
+            margin: 20px 0;
+        }
+        
+        .algorithm-steps {
+            background-color: #f0f7ff;
+            border-radius: 8px;
+            padding: 15px;
+            margin: 15px 0;
+        }
+        
+        .algorithm-step {
+            margin-bottom: 10px;
+            padding-left: 20px;
+            position: relative;
+        }
+        
+        .algorithm-step:before {
+            content: "→";
+            position: absolute;
+            left: 0;
+            color: var(--primary);
+            font-weight: bold;
+        }
+        
+        @media (max-width: 768px) {
+            .coordinate-system {
+                flex-direction: column;
+            }
+            
+            .visual-explanation {
+                flex-direction: column;
+            }
+            
+            .parameter-explanation {
+                grid-template-columns: 1fr;
+            }
+        }
+    </style>
+    <script src="https://polyfill.io/v3/polyfill.min.js?features=es6"></script>
+    <script id="MathJax-script" async src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
+</head>
+<body>
+    <header>
+        <h1>相机标定完整指南</h1>
+        <p class="description">世界坐标与像素坐标的关系，以及移动标定板对标定参数的影响</p>
+    </header>
+    
+    <div class="section">
+        <h2 class="section-title">
+            <span class="section-icon">🎯</span>
+            概述
+        </h2>
+        
+        <p>相机标定是计算机视觉中的基础任务，目的是确定相机的内部参数（内参）和外部参数（外参）。本指南详细解释：</p>
+        
+        <ul>
+            <li>世界坐标系与像素坐标系的定义与关系</li>
+            <li>如何从棋盘格标定板获取这两种坐标</li>
+            <li>移动标定板对内参和外参的影响</li>
+            <li>完整的标定流程和数学原理</li>
+        </ul>
+        
+        <div class="correct-answer">
+            <p class="correct-icon">✅ 核心结论</p>
+            <p><strong>"如果在拍摄过程中保持相机位置不动，移动标定板拍摄图片，每一张图片对应的内参是相同的，但是外参不同，因为世界坐标系会随着标定板的移动而移动。"</strong></p>
+            <p>这个理解完全正确，是相机标定的基本原理。</p>
+        </div>
+    </div>
+    
+    <div class="section">
+        <h2 class="section-title">
+            <span class="section-icon">🌍</span>
+            世界坐标系与像素坐标系
+        </h2>
+        
+        <div class="coordinate-system">
+            <div class="coord-system">
+                <div class="coord-title">世界坐标系</div>
+                <p>描述物体在真实3D空间中的位置：</p>
+                <ul>
+                    <li><strong>原点</strong>：通常设在棋盘格的某个角点</li>
+                    <li><strong>X轴、Y轴</strong>：沿着棋盘格的行和列方向</li>
+                    <li><strong>Z轴</strong>：垂直于棋盘格平面（通常设为0）</li>
+                    <li><strong>单位</strong>：物理单位（毫米、厘米等）</li>
+                </ul>
+                
+                <div class="coord-visual world-coord-visual">
+                    <div class="grid-lines"></div>
+                    <div class="origin"></div>
+                    <div class="axis x-axis">X轴</div>
+                    <div class="axis y-axis">Y轴</div>
+                    <div class="axis z-axis">Z轴</div>
+                    
+                    <!-- 示例角点 -->
+                    <div class="corner-point" style="top: 30%; left: 30%;"></div>
+                    <div class="point-label" style="top: 25%; left: 35%;">(0,0,0)</div>
+                    
+                    <div class="corner-point" style="top: 30%; left: 50%;"></div>
+                    <div class="point-label" style="top: 25%; left: 55%;">(25,0,0)</div>
+                    
+                    <div class="corner-point" style="top: 30%; left: 70%;"></div>
+                    <div class="point-label" style="top: 25%; left: 75%;">(50,0,0)</div>
+                    
+                    <div class="corner-point" style="top: 50%; left: 30%;"></div>
+                    <div class="point-label" style="top: 55%; left: 35%;">(0,25,0)</div>
+                    
+                    <div class="corner-point" style="top: 50%; left: 50%;"></div>
+                    <div class="point-label" style="top: 55%; left: 55%;">(25,25,0)</div>
+                </div>
+                
+                <p><strong>生成方法：</strong> 根据棋盘格规格和物理尺寸计算</p>
+            </div>
+            
+            <div class="coord-system">
+                <div class="coord-title">像素坐标系</div>
+                <p>描述点在数字图像中的位置：</p>
+                <ul>
+                    <li><strong>原点</strong>：图像左上角</li>
+                    <li><strong>u轴</strong>：水平向右（列方向）</li>
+                    <li><strong>v轴</strong>：垂直向下（行方向）</li>
+                    <li><strong>单位</strong>：像素</li>
+                </ul>
+                
+                <div class="coord-visual pixel-coord-visual">
+                    <div class="grid-lines" style="background-size: 10% 10%;"></div>
+                    <div class="origin" style="bottom: auto; top: 30px; left: 30px;"></div>
+                    <div class="axis x-axis">u (列)</div>
+                    <div class="axis y-axis" style="left: 10px; top: 50%; transform: translateY(-50%);">v (行)</div>
+                    
+                    <!-- 示例角点 -->
+                    <div class="corner-point" style="top: 40%; left: 40%;"></div>
+                    <div class="point-label" style="top: 35%; left: 45%;">(320,240)</div>
+                    
+                    <div class="corner-point" style="top: 40%; left: 60%;"></div>
+                    <div class="point-label" style="top: 35%; left: 65%;">(480,240)</div>
+                    
+                    <div class="corner-point" style="top: 60%; left: 40%;"></div>
+                    <div class="point-label" style="top: 65%; left: 45%;">(320,360)</div>
+                    
+                    <div class="corner-point" style="top: 60%; left: 60%;"></div>
+                    <div class="point-label" style="top: 65%; left: 65%;">(480,360)</div>
+                </div>
+                
+                <p><strong>获取方法：</strong> 通过图像处理算法检测角点</p>
+            </div>
+        </div>
+        
+        <table class="comparison-table">
+            <thead>
+                <tr>
+                    <th>特性</th>
+                    <th>世界坐标系</th>
+                    <th>像素坐标系</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td><strong>维度</strong></td>
+                    <td>3D (X, Y, Z)</td>
+                    <td>2D (u, v)</td>
+                </tr>
+                <tr>
+                    <td><strong>原点位置</strong></td>
+                    <td>棋盘格上的角点</td>
+                    <td>图像左上角</td>
+                </tr>
+                <tr>
+                    <td><strong>坐标轴方向</strong></td>
+                    <td>X: 右, Y: 下, Z: 垂直于标定板</td>
+                    <td>u: 右 (列), v: 下 (行)</td>
+                </tr>
+                <tr>
+                    <td><strong>单位</strong></td>
+                    <td>物理单位 (mm, cm)</td>
+                    <td>像素</td>
+                </tr>
+                <tr>
+                    <td><strong>获取方式</strong></td>
+                    <td>根据棋盘格规格和物理尺寸计算</td>
+                    <td>通过图像处理算法检测</td>
+                </tr>
+            </tbody>
+        </table>
+    </div>
+    
+    <div class="section">
+        <h2 class="section-title">
+            <span class="section-icon">🔄</span>
+            坐标获取与对应关系建立
+        </h2>
+        
+        <div class="step">
+            <div class="step-number">1</div>
+            <div class="step-title">生成世界坐标</div>
+            <p>根据棋盘格规格和物理尺寸计算所有角点的3D坐标：</p>
+            
+            <div class="code-example">
+                <pre><code><span class="code-comment"># Python代码示例：生成世界坐标</span>
+<span class="code-keyword">import</span> numpy <span class="code-keyword">as</span> np
+
+<span class="code-comment"># 棋盘格参数</span>
+pattern_size = (9, 6)  <span class="code-comment"># 内角点数量 (cols, rows)</span>
+square_size = 25.0     <span class="code-comment"># 每个方格的物理尺寸 (mm)</span>
+
+<span class="code-comment"># 生成世界坐标</span>
+objp = np.zeros((pattern_size[0] * pattern_size[1], 3), np.float32)
+objp[:, :2] = np.mgrid[0:pattern_size[0], 0:pattern_size[1]].T.reshape(-1, 2)
+objp *= square_size  <span class="code-comment"># 乘以物理尺寸</span></code></pre>
+            </div>
+        </div>
+        
+        <div class="step">
+            <div class="step-number">2</div>
+            <div class="step-title">检测像素坐标</div>
+            <p>使用计算机视觉算法检测图像中的角点位置：</p>
+            
+            <div class="code-example">
+                <pre><code><span class="code-comment"># Python代码示例：获取像素坐标</span>
+<span class="code-keyword">import</span> cv2
+
+<span class="code-comment"># 读取图像并转换为灰度图</span>
+img = cv2.imread(<span class="code-string">'chessboard.jpg'</span>)
+gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+
+<span class="code-comment"># 查找角点</span>
+ret, corners = cv2.findChessboardCorners(gray, pattern_size, None)
+
+<span class="code-keyword">if</span> ret:
+    <span class="code-comment"># 亚像素精确化</span>
+    criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 0.001)
+    corners_refined = cv2.cornerSubPix(gray, corners, (11,11), (-1,-1), criteria)</code></pre>
+            </div>
+        </div>
+        
+        <div class="step">
+            <div class="step-number">3</div>
+            <div class="step-title">建立对应关系</div>
+            <p>将世界坐标与像素坐标配对，用于相机标定：</p>
+            
+            <div class="code-example">
+                <pre><code><span class="code-comment"># 添加到对应关系列表</span>
+object_points.append(objp)      <span class="code-comment"># 世界坐标</span>
+image_points.append(corners_refined)  <span class="code-comment"># 像素坐标</span>
+
+<span class="code-comment"># 执行相机标定</span>
+ret, K, dist, rvecs, tvecs = cv2.calibrateCamera(
+    object_points, image_points, gray.shape[::-1], None, None
+)</code></pre>
+            </div>
+        </div>
+    </div>
+    
+    <div class="section">
+        <h2 class="section-title">
+            <span class="section-icon">📷</span>
+            相机参数：内参与外参
+        </h2>
+        
+        <div class="parameter-explanation">
+            <div class="parameter-card intrinsic">
+                <div class="parameter-title">
+                    <div class="parameter-icon">K</div>
+                    <span>内参矩阵 (Intrinsic Parameters)</span>
+                </div>
+                <p><strong>描述相机内部特性</strong>，与相机本身有关：</p>
+                <div class="math-equation">
+                    \[
+                    K = \begin{bmatrix}
+                    f_x & \gamma & u_0 \\
+                    0 & f_y & v_0 \\
+                    0 & 0 & 1
+                    \end{bmatrix}
+                    \]
+                </div>
+                <ul>
+                    <li>\(f_x, f_y\)：焦距（像素单位）</li>
+                    <li>\((u_0, v_0)\)：主点坐标（图像中心）</li>
+                    <li>\(\gamma\)：倾斜系数（通常为0）</li>
+                </ul>
+                <p><strong>关键特性：</strong></p>
+                <ul>
+                    <li>只与相机硬件有关</li>
+                    <li>在相机固定时保持不变</li>
+                    <li>不随标定板移动而改变</li>
+                </ul>
+            </div>
+            
+            <div class="parameter-card extrinsic">
+                <div class="parameter-title">
+                    <div class="parameter-icon">R|t</div>
+                    <span>外参矩阵 (Extrinsic Parameters)</span>
+                </div>
+                <p><strong>描述世界坐标系与相机坐标系的关系</strong>：</p>
+                <div class="math-equation">
+                    \[
+                    [R|t] = \begin{bmatrix}
+                    r_{11} & r_{12} & r_{13} & t_x \\
+                    r_{21} & r_{22} & r_{23} & t_y \\
+                    r_{31} & r_{32} & r_{33} & t_z
+                    \end{bmatrix}
+                    \]
+                </div>
+                <ul>
+                    <li>\(R\)：3×3旋转矩阵</li>
+                    <li>\(t\)：3×1平移向量</li>
+                </ul>
+                <p><strong>关键特性：</strong></p>
+                <ul>
+                    <li>描述标定板相对于相机的位置和方向</li>
+                    <li>每张图片都不同（标定板移动）</li>
+                    <li>世界坐标系随标定板定义而变化</li>
+                </ul>
+            </div>
+        </div>
+        
+        <div class="math-equation">
+            \[
+            s \begin{bmatrix} u \\ v \\ 1 \end{bmatrix} = 
+            K \cdot [R|t] \cdot 
+            \begin{bmatrix} X_w \\ Y_w \\ Z_w \\ 1 \end{bmatrix}
+            \]
+        </div>
+        
+        <p>完整的相机投影模型，将世界坐标 \((X_w, Y_w, Z_w)\) 映射到像素坐标 \((u, v)\)。</p>
+    </div>
+    
+    <div class="section">
+        <h2 class="section-title">
+            <span class="section-icon">🔄</span>
+            移动标定板对参数的影响
+        </h2>
+        
+        <div class="visual-explanation">
+            <div class="visual-item">
+                <div class="visual-title">固定相机，移动标定板</div>
+                <div class="camera-setup">
+                    <div class="camera">
+                        <div class="camera-lens"></div>
+                    </div>
+                    <div class="chessboard" id="chessboard1" style="top: 30%; left: 20%;"></div>
+                    <div class="chessboard" id="chessboard2" style="top: 50%; left: 60%; transform: rotate(15deg);"></div>
+                    <div class="chessboard" id="chessboard3" style="top: 20%; left: 70%; transform: rotate(-10deg);"></div>
+                    
+                    <div class="coordinate-system-label world-coord-label">世界坐标系<br>(随标定板移动)</div>
+                    <div class="coordinate-system-label camera-coord-label">相机坐标系<br>(固定)</div>
+                </div>
+                <p>相机位置固定，标定板在不同位置和方向。每张图片中，标定板的世界坐标系都不同。</p>
+            </div>
+        </div>
+        
+        <div class="correct-answer">
+            <p class="correct-icon">✅ 关键结论</p>
+            <p><strong>在固定相机、移动标定板的标定过程中：</strong></p>
+            <ul>
+                <li><strong>内参矩阵 K</strong>：保持不变（所有图片相同）</li>
+                <li><strong>外参矩阵 [R|t]</strong>：每张图片都不同</li>
+                <li><strong>世界坐标系</strong>：随标定板移动而变化</li>
+            </ul>
+        </div>
+        
+        <table class="comparison-table">
+            <thead>
+                <tr>
+                    <th>拍摄场景</th>
+                    <th>内参矩阵 K</th>
+                    <th>外参矩阵 [R|t]</th>
+                    <th>世界坐标系</th>
+                    <th>说明</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td><strong>相机固定，标定板移动</strong></td>
+                    <td>相同</td>
+                    <td>不同（每张图片）</td>
+                    <td>随标定板移动</td>
+                    <td>标准标定方法</td>
+                </tr>
+                <tr>
+                    <td><strong>标定板固定，相机移动</strong></td>
+                    <td>相同*</td>
+                    <td>不同（每张图片）</td>
+                    <td>固定</td>
+                    <td>*假设相机参数不变（无变焦）</td>
+                </tr>
+                <tr>
+                    <td><strong>相机和标定板都固定</strong></td>
+                    <td>相同</td>
+                    <td>相同</td>
+                    <td>固定</td>
+                    <td>无法标定（需要多个视角）</td>
+                </tr>
+            </tbody>
+        </table>
+        
+        <div class="step-by-step">
+            <div class="algorithm-step"><strong>为什么需要多张图片？</strong> 单张图片无法区分内参和外参的影响</div>
+            <div class="algorithm-step"><strong>为什么需要不同视角？</strong> 提供足够的约束来唯一确定所有参数</div>
+            <div class="algorithm-step"><strong>世界坐标系的灵活性</strong>：每张图片可以有自己的世界坐标系定义</div>
+            <div class="algorithm-step"><strong>标定板移动的优势</strong>：更容易获得多样化的视角</div>
+        </div>
+    </div>
+    
+    <div class="section">
+        <h2 class="section-title">
+            <span class="section-icon">⚙️</span>
+            完整标定流程
+        </h2>
+        
+        <div class="algorithm-steps">
+            <div class="algorithm-step">准备多张不同视角的棋盘格图像（建议10-20张）</div>
+            <div class="algorithm-step">定义棋盘格规格（内角点数量）和物理尺寸</div>
+            <div class="algorithm-step">生成世界坐标（基于棋盘格规格和物理尺寸）</div>
+            <div class="algorithm-step">对于每张图像，检测角点并获取像素坐标</div>
+            <div class="algorithm-step">建立世界坐标与像素坐标的对应关系</div>
+            <div class="algorithm-step">使用线性方法估计初始内参和外参</div>
+            <div class="algorithm-step">通过非线性优化细化所有参数</div>
+            <div class="algorithm-step">评估标定结果（重投影误差）</div>
+        </div>
+        
+        <div class="code-example">
+            <pre><code><span class="code-comment"># 完整标定代码示例</span>
+<span class="code-keyword">import</span> cv2
+<span class="code-keyword">import</span> numpy <span class="code-keyword">as</span> np
+<span class="code-keyword">import</span> glob
+
+<span class="code-comment"># 设置参数</span>
+pattern_size = (9, 6)
+square_size = 25.0
+images = glob.glob(<span class="code-string">'calibration_images/*.jpg'</span>)
+
+<span class="code-comment"># 生成世界坐标</span>
+objp = np.zeros((pattern_size[0] * pattern_size[1], 3), np.float32)
+objp[:, :2] = np.mgrid[0:pattern_size[0], 0:pattern_size[1]].T.reshape(-1, 2)
+objp *= square_size
+
+<span class="code-comment"># 初始化存储列表</span>
+object_points = []
+image_points = []
+
+<span class="code-comment"># 处理每张图像</span>
+<span class="code-keyword">for</span> fname <span class="code-keyword">in</span> images:
+    img = cv2.imread(fname)
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    
+    <span class="code-comment"># 查找角点</span>
+    ret, corners = cv2.findChessboardCorners(gray, pattern_size, None)
+    
+    <span class="code-keyword">if</span> ret:
+        <span class="code-comment"># 亚像素精确化</span>
+        corners_refined = cv2.cornerSubPix(gray, corners, (11,11), (-1,-1), criteria)
+        
+        <span class="code-comment"># 添加到列表</span>
+        object_points.append(objp)
+        image_points.append(corners_refined)
+
+<span class="code-comment"># 相机标定</span>
+ret, K, dist, rvecs, tvecs = cv2.calibrateCamera(
+    object_points, image_points, gray.shape[::-1], None, None
+)
+
+<span class="code-keyword">print</span>(<span class="code-string">"内参矩阵 K:"</span>)
+<span class="code-keyword">print</span>(K)
+<span class="code-keyword">print</span>(<span class="code-string">"重投影误差:"</span>, ret)</code></pre>
+        </div>
+    </div>
+    
+    <div class="section">
+        <h2 class="section-title">
+            <span class="section-icon">💡</span>
+            总结
+        </h2>
+        
+        <div class="correct-answer">
+            <p><strong>核心要点总结：</strong></p>
+            
+            <ol>
+                <li><strong>世界坐标与像素坐标</strong>：世界坐标基于物理尺寸，像素坐标基于图像位置，两者通过相机模型建立映射关系</li>
+                <li><strong>内参与外参</strong>：内参描述相机内部特性，外参描述标定板相对于相机的位置和方向</li>
+                <li><strong>移动标定板的影响</strong>：在固定相机、移动标定板的标定过程中，内参保持不变，外参随每张图片变化</li>
+                <li><strong>标定原理</strong>：通过多张不同视角的图片，提供足够的约束来唯一确定相机参数</li>
+            </ol>
+            
+            <p>这种理解是进行准确相机标定的关键，也是张正友标定法等经典方法的基础。正确理解世界坐标与像素坐标的关系，以及移动标定板对参数的影响，对于成功实施相机标定至关重要。</p>
+        </div>
+    </div>
+
+    <script>
+        // 简单的动画效果
+        document.addEventListener('DOMContentLoaded', function() {
+            const chessboards = document.querySelectorAll('.chessboard');
+            
+            // 初始隐藏所有棋盘格
+            chessboards.forEach(board => {
+                board.style.opacity = '0';
+            });
+            
+            // 依次显示棋盘格
+            setTimeout(() => {
+                chessboards[0].style.opacity = '1';
+                chessboards[0].style.transition = 'opacity 1s ease';
+            }, 500);
+            
+            setTimeout(() => {
+                chessboards[1].style.opacity = '1';
+                chessboards[1].style.transition = 'opacity 1s ease';
+            }, 1500);
+            
+            setTimeout(() => {
+                chessboards[2].style.opacity = '1';
+                chessboards[2].style.transition = 'opacity 1s ease';
+            }, 2500);
+            
+            // 循环移动效果
+            setInterval(() => {
+                chessboards.forEach((board, index) => {
+                    const top = 20 + Math.random() * 60;
+                    const left = 10 + Math.random() * 70;
+                    const rotation = -20 + Math.random() * 40;
+                    
+                    board.style.transition = 'all 2s ease';
+                    board.style.top = `${top}%`;
+                    board.style.left = `${left}%`;
+                    board.style.transform = `rotate(${rotation}deg)`;
+                });
+            }, 5000);
+            
+            // 角点点击效果
+            const cornerPoints = document.querySelectorAll('.corner-point');
+            cornerPoints.forEach(point => {
+                point.addEventListener('click', function() {
+                    this.style.backgroundColor = this.style.backgroundColor === 'rgb(231, 76, 60)' ? 
+                                                '#f39c12' : '#e74c3c';
+                });
+            });
+        });
+    </script>
+</body>
+</html>

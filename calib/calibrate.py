@@ -147,6 +147,7 @@ def compute_homographies(objpoints_list: List[np.ndarray],
             H, mask = cv2.findHomography(src, dst, cv2.RANSAC, ransac_thresh)
             if H is None:
                 # 回退 DLT
+                print("warning: RANSAC homography failed, falling back to DLT")
                 H = compute_homography(src, dst)
         else:
             H = compute_homography(src, dst)
