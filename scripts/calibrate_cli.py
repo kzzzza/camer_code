@@ -1,9 +1,6 @@
-"""统一相机标定与评估 CLI（仅保留 all 模式）
-
+"""统一相机标定与评估 CLI
 在一次运行中依次执行 calibrate + evaluate，并统一打包输出
-
-示例：
-python scripts/calibrate_cli.py --images 'images/calib/*.png' --pattern 9 6 --square 0.029 --bundle run_name
+eg python scripts/calibrate_cli.py --image 'images/11_15_2058/*.jpg' --pattern 9 6 --square 0.029 --use-ransac --bundle run_1221_split --per-image-heatmap
 """
 
 import argparse
@@ -22,7 +19,7 @@ if ROOT not in sys.path:
 import numpy as np
 import cv2
 
-from calib.calibrate import calibrate_from_images, detect_corners
+from calib.calibrate import calibrate_from_images, detect_corners, calibrate_from_points
 
 
 def build_flags(args):
@@ -75,6 +72,13 @@ def build_parser():
     # 数据集划分选项
     parser.add_argument('--val-ratio', type=float, default=0.3, help='验证集占比（0~1），其余作为训练集，仅用训练集进行标定')
     parser.add_argument('--split-seed', type=int, default=42, help='数据划分随机种子（确保可复现的划分）')
+    # 直接指定训练/验证目录（提供则优先使用目录划分，忽略 --val-ratio）
+    parser.add_argument('--train-dir', type=str, default=None, help='训练集图片目录（将读取该目录下的所有文件作为输入）')
+    parser.add_argument('--val-dir', type=str, default=None, help='验证/测试集图片目录（将读取该目录下的所有文件作为输入）')
+    # 基于角点空间位置的点级划分（仅当使用 --images 时生效；优先级最高）
+    parser.add_argument('--point-split', action='store_true', help='启用基于角点位置的划分：训练仅使用在给定归一化区域内的角点，测试使用全体角点')
+    parser.add_argument('--train-urange', nargs=2, type=float, default=[0.0, 0.5], help='训练集角点的归一化 u 范围 [umin umax]，例如 0 0.5 表示左半边')
+    parser.add_argument('--train-vrange', nargs=2, type=float, default=[0.0, 1.0], help='训练集角点的归一化 v 范围 [vmin vmax]，默认全高')
 
     return parser
 
@@ -228,19 +232,21 @@ def evaluate_set(set_name: str,
     return {}
 
 
-# ---------------------- 单一模式实现（all） ----------------------
+# ---------------------- 实验 pipeline 实现 ----------------------
 def cmd_all(args):
     # 1) 校验与准备
-    if not args.images:
-        print('all 模式需要提供 --images')
+    if not args.images and not (args.train_dir and args.val_dir):
+        print('all 模式需要提供 --images（glob）或同时提供 --train-dir 与 --val-dir（目录）')
         return 1
     if args.pattern is None or args.square is None:
         print('缺少必需参数：--pattern 与 --square')
         return 1
-    images = glob.glob(args.images)
-    if not images:
-        print('未找到匹配的图片：', args.images)
-        return 1
+    images = []
+    if args.images:
+        images = glob.glob(args.images)
+        if not images:
+            print('未找到匹配的图片：', args.images)
+            return 1
     pattern = (args.pattern[0], args.pattern[1])
     flags = build_flags(args)
     criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, int(args.iter), float(args.eps))
@@ -253,19 +259,229 @@ def cmd_all(args):
     bundle_dir = os.path.abspath(os.path.join(ROOT, 'out', args.bundle or 'run_all'))
     ensure_dir(bundle_dir)
 
-    # 2) 数据集划分（train/val）
-    val_ratio = float(args.val_ratio)
-    val_ratio = min(max(val_ratio, 0.0), 0.9)  # 防止全部进验证集
-    rng = np.random.default_rng(int(args.split_seed))
-    images_shuffled = images[:]
-    rng.shuffle(images_shuffled)
-    n_total = len(images_shuffled)
-    n_val = int(np.floor(n_total * val_ratio))
-    n_val = min(max(n_val, 1), n_total - 3)  # 至少预留 3 张给训练
-    val_images = images_shuffled[:n_val]
-    train_images = images_shuffled[n_val:]
+    # 2) 划分：优先 point-split（基于角点位置），否则使用目录或随机比例
+    use_point_split = bool(args.point_split and args.images)
+    use_dir_split = (not use_point_split) and bool(args.train_dir and args.val_dir)
+    if use_point_split:
+        # 基于角点空间位置划分（同一批 images）：训练只用指定归一化区域内的角点；验证/测试使用全体角点
+        print("\n=== [Split:point] Using corner position ranges for training points ===")
+        obj_full, img_full, used_full = detect_corners(images, pattern, args.square)
+        if len(obj_full) < 3:
+            print('有效图片不足 3 张，无法进行可靠标定（point-split）')
+            return 2
+        # 构建训练点（按 u/v 归一化范围过滤）与全量测试点
+        umin, umax = float(args.train_urange[0]), float(args.train_urange[1])
+        vmin, vmax = float(args.train_vrange[0]), float(args.train_vrange[1])
+        obj_tr_list, img_tr_list, used_tr = [], [], []
+        obj_all_list, img_all_list, used_all = [], [], []
+        for path, objp, imgp in zip(used_full, obj_full, img_full):
+            img = cv2.imread(path)
+            if img is None:
+                continue
+            h, w = img.shape[:2]
+            u = imgp[:, 0] / max(w, 1)
+            v = imgp[:, 1] / max(h, 1)
+            m = (u >= umin) & (u <= umax) & (v >= vmin) & (v <= vmax)
+            if np.count_nonzero(m) >= 4:
+                obj_tr_list.append(objp[m])
+                img_tr_list.append(imgp[m])
+                used_tr.append(path)
+            # 全量点（用于测试/验证）
+            obj_all_list.append(objp)
+            img_all_list.append(imgp)
+            used_all.append(path)
 
-    print(f"\n=== [Split] total={n_total}, train={len(train_images)}, val={len(val_images)}, ratio={val_ratio:.2f}, seed={int(args.split_seed)} ===")
+        n_total = len(used_full)
+        print(f"total images={n_total}, train views(after filter)={len(used_tr)}; train u-range=[{umin},{umax}], v-range=[{vmin},{vmax}]")
+
+        # 3) 用训练点标定
+        print('\n=== [1/3] Calibrate (Train Points) ===')
+        try:
+            # 读取样例尺寸
+            sample_img = cv2.imread(used_full[0])
+            Hsamp, Wsamp = sample_img.shape[:2] if sample_img is not None else (None, None)
+            size_hint = (Wsamp, Hsamp) if Wsamp and Hsamp else None
+            calib_res = calibrate_from_points(obj_tr_list, img_tr_list, used_tr, image_size_hint=size_hint,
+                                              use_ransac=args.use_ransac, calib_flags=flags, criteria=criteria)
+        except Exception as e:
+            print('标定失败（point-split）：', repr(e))
+            return 2
+        print('训练视图数：', len(calib_res['used_images']))
+        print('K (优化)：\n', calib_res['K'])
+        print('dist (k1,k2)：', calib_res['dist'])
+        print('训练 RMS (calibrateCamera)：', calib_res.get('rms', 'N/A'))
+
+        K_est, dist_est = calib_res['K'], calib_res['dist']
+        bins_x, bins_y = int(args.grid[0]), int(args.grid[1])
+
+        # 4) Evaluate 训练（仅训练点）
+        print('\n=== [2/3] Evaluate (Train Points) ===')
+        if len(obj_tr_list) < 3:
+            print('训练视图（过滤后）不足 3，无法可靠评估')
+            return 2
+        overall_rms_tr, per_rms_tr, residuals_tr = compute_reprojection_stats(K_est, dist_est, obj_tr_list, img_tr_list)
+        rms_grid_tr, counts_grid_tr = compute_spatial_heatmap(used_tr, img_tr_list, residuals_tr, bins_x, bins_y)
+
+        train_dir = os.path.join(bundle_dir, 'train')
+        ensure_dir(train_dir)
+        print('\nVisualizing residuals (train points) to', train_dir)
+        visualize_residuals(used_tr, img_tr_list, residuals_tr, train_dir, show=args.show_vis, arrow_scale=args.arrow_scale)
+        heat_train = os.path.join(train_dir, 'rms_heatmap.png')
+        visualize_heatmap(rms_grid_tr, counts_grid_tr, heat_train, title=f'TrainPoints RMS heatmap ({bins_x}x{bins_y})')
+        eval_files_tr = [os.path.join(train_dir, os.path.basename(p)) for p in used_tr]
+        eval_files_tr.append(heat_train)
+        if args.per_image_heatmap:
+            for path, pts, residual in zip(used_tr, img_tr_list, residuals_tr):
+                rms_i, counts_i = compute_spatial_heatmap([path], [pts], [residual], bins_x, bins_y)
+                fname = os.path.splitext(os.path.basename(path))[0]
+                out_i = os.path.join(train_dir, f'{fname}_heatmap.png')
+                visualize_heatmap(rms_i, counts_i, out_i, title=f'TrainPts RMS {fname}')
+                eval_files_tr.append(out_i)
+
+        # 5) Evaluate 验证（全量点）
+        print('\n=== [3/3] Evaluate (All Points as Val) ===')
+        obj_val_list, img_val_list, used_val = obj_all_list, img_all_list, used_all
+        overall_rms_val, per_rms_val, residuals_val = compute_reprojection_stats(K_est, dist_est, obj_val_list, img_val_list)
+        rms_grid_val, counts_grid_val = compute_spatial_heatmap(used_val, img_val_list, residuals_val, bins_x, bins_y)
+
+        val_dir = os.path.join(bundle_dir, 'val')
+        ensure_dir(val_dir)
+        print('\nVisualizing residuals (val all-points) to', val_dir)
+        visualize_residuals(used_val, img_val_list, residuals_val, val_dir, show=args.show_vis, arrow_scale=args.arrow_scale)
+        heat_val = os.path.join(val_dir, 'rms_heatmap.png')
+        visualize_heatmap(rms_grid_val, counts_grid_val, heat_val, title=f'ValAll RMS heatmap ({bins_x}x{bins_y})')
+        eval_files_val = [os.path.join(val_dir, os.path.basename(p)) for p in used_val]
+        eval_files_val.append(heat_val)
+        if args.per_image_heatmap:
+            for path, pts, residual in zip(used_val, img_val_list, residuals_val):
+                rms_i, counts_i = compute_spatial_heatmap([path], [pts], [residual], bins_x, bins_y)
+                fname = os.path.splitext(os.path.basename(path))[0]
+                out_i = os.path.join(val_dir, f'{fname}_heatmap.png')
+                visualize_heatmap(rms_i, counts_i, out_i, title=f'ValAll RMS {fname}')
+                eval_files_val.append(out_i)
+
+        # overall（全量点）
+        print('\n=== [4/4] Evaluate (All Images Heatmap) ===')
+        obj_all, img_all, used_all2 = obj_val_list, img_val_list, used_val
+        overall_rms_all, per_rms_all, residuals_all = overall_rms_val, per_rms_val, residuals_val
+        rms_grid_all, counts_grid_all = rms_grid_val, counts_grid_val
+        heat_all = os.path.join(bundle_dir, 'rms_heatmap_all.png')
+        visualize_heatmap(rms_grid_all, counts_grid_all, heat_all, title=f'All RMS heatmap ({bins_x}x{bins_y})')
+
+        # 综合 JSON 输出（point-split）
+        combined = {
+            'timestamp': timestamp,
+            'opencv_version': opencv_version,
+            'images_glob': args.images,
+            'train_dir': None,
+            'val_dir': None,
+            'matched_image_count': n_total,
+            'pattern': [pattern[0], pattern[1]],
+            'square': float(args.square),
+            'use_ransac': bool(args.use_ransac),
+            'split': {
+                'mode': 'point',
+                'train_urange': [umin, umax],
+                'train_vrange': [vmin, vmax],
+                'counts': {'total_images': n_total, 'train_views': len(used_tr), 'val_views': len(used_val)}
+            },
+            'calibrate': {
+                'used_image_count': len(calib_res['used_images']),
+                'used_images': calib_res['used_images'],
+                'K_init': calib_res['K_init'].tolist(),
+                'K': calib_res['K'].tolist(),
+                'dist': calib_res['dist'].tolist(),
+                'calibrate_rms': float(calib_res.get('rms', float('nan')))
+            },
+            'train_evaluate': {
+                'used_image_count': len(used_tr),
+                'used_images': used_tr,
+                'overall_reprojection_rms_px': float(overall_rms_tr),
+                'per_image_rms_px': per_rms_tr,
+                'spatial_distribution': {
+                    'rms_grid': rms_grid_tr.tolist(),
+                    'counts_grid': counts_grid_tr.tolist()
+                },
+                'visualization_dir': train_dir,
+                'visualization_files': eval_files_tr
+            },
+            'val_evaluate': {
+                'used_image_count': len(used_val),
+                'used_images': used_val,
+                'overall_reprojection_rms_px': float(overall_rms_val),
+                'per_image_rms_px': per_rms_val,
+                'spatial_distribution': {
+                    'rms_grid': rms_grid_val.tolist(),
+                    'counts_grid': counts_grid_val.tolist()
+                },
+                'visualization_dir': val_dir,
+                'visualization_files': eval_files_val
+            },
+            'overall_evaluate': {
+                'used_image_count': len(used_all2),
+                'used_images': used_all2,
+                'overall_reprojection_rms_px': float(overall_rms_all),
+                'per_image_rms_px': per_rms_all,
+                'spatial_distribution': {
+                    'rms_grid': rms_grid_all.tolist(),
+                    'counts_grid': counts_grid_all.tolist()
+                },
+                'visualization_dir': bundle_dir,
+                'visualization_files': [heat_all]
+            },
+        }
+        out_json = os.path.join(bundle_dir, 'results_all.json')
+        with open(out_json, 'w', encoding='utf-8') as f:
+            json.dump(combined, f, ensure_ascii=False, indent=2)
+        print('\n[All] Bundle saved to', bundle_dir)
+        print('[All] JSON:', out_json)
+
+        # 写子目录 JSON
+        train_json = {
+            'subset': 'train_points',
+            'images': used_tr,
+            'evaluate': combined['train_evaluate']
+        }
+        with open(os.path.join(train_dir, 'results_train_points.json'), 'w', encoding='utf-8') as f:
+            json.dump(train_json, f, ensure_ascii=False, indent=2)
+        val_json = {
+            'subset': 'val_all_points',
+            'images': used_val,
+            'evaluate': combined['val_evaluate']
+        }
+        with open(os.path.join(val_dir, 'results_val_all_points.json'), 'w', encoding='utf-8') as f:
+            json.dump(val_json, f, ensure_ascii=False, indent=2)
+        return 0
+
+    if use_dir_split:
+        train_images = sorted(glob.glob(os.path.join(args.train_dir, '*')))
+        val_images = sorted(glob.glob(os.path.join(args.val_dir, '*')))
+        n_total = len(train_images) + len(val_images)
+        print(f"\n=== [Split:dir] total={n_total}, train={len(train_images)} (dir={args.train_dir}), val={len(val_images)} (dir={args.val_dir}) ===")
+        split_meta = {
+            'mode': 'dir',
+            'sources': {'train_dir': args.train_dir, 'val_dir': args.val_dir},
+            'counts': {'total': n_total, 'train': len(train_images), 'val': len(val_images)}
+        }
+    else:
+        val_ratio = float(args.val_ratio)
+        val_ratio = min(max(val_ratio, 0.0), 0.9)  # 防止全部进验证集
+        rng = np.random.default_rng(int(args.split_seed))
+        images_shuffled = images[:]
+        rng.shuffle(images_shuffled)
+        n_total = len(images_shuffled)
+        n_val = int(np.floor(n_total * val_ratio))
+        n_val = min(max(n_val, 1), n_total - 3)  # 至少预留 3 张给训练
+        val_images = images_shuffled[:n_val]
+        train_images = images_shuffled[n_val:]
+        print(f"\n=== [Split:ratio] total={n_total}, train={len(train_images)}, val={len(val_images)}, ratio={val_ratio:.2f}, seed={int(args.split_seed)} ===")
+        split_meta = {
+            'mode': 'ratio',
+            'sources': {'images_glob': args.images},
+            'val_ratio': float(val_ratio),
+            'seed': int(args.split_seed),
+            'counts': {'total': n_total, 'train': len(train_images), 'val': len(val_images)}
+        }
 
     # 3) calibrate（仅使用训练集）
     print('\n=== [1/3] Calibrate (Train) ===')
@@ -333,20 +549,34 @@ def cmd_all(args):
             eval_files_val.append(out_i)
 
 
+    # 4b) overall（所有图片的整体热力图，不单张可视化）
+    print('\n=== [4/4] Evaluate (All Images Heatmap) ===')
+    obj_all = obj_tr + obj_val
+    img_all = img_tr + img_val
+    used_all = used_tr + used_val
+    if len(obj_all) > 0:
+        overall_rms_all, per_rms_all, residuals_all = compute_reprojection_stats(K_est, dist_est, obj_all, img_all)
+        rms_grid_all, counts_grid_all = compute_spatial_heatmap(used_all, img_all, residuals_all, bins_x, bins_y)
+    else:
+        overall_rms_all, per_rms_all = 0.0, []
+        rms_grid_all = np.zeros((bins_y, bins_x), dtype=np.float64)
+        counts_grid_all = np.zeros((bins_y, bins_x), dtype=np.int32)
+    heat_all = os.path.join(bundle_dir, 'rms_heatmap_all.png')
+    visualize_heatmap(rms_grid_all, counts_grid_all, heat_all, title=f'All RMS heatmap ({bins_x}x{bins_y})')
+
+
     # 5) 综合 JSON 输出（根目录 + 子目录）
     combined = {
         'timestamp': timestamp,
         'opencv_version': opencv_version,
-        'images_glob': args.images,
-        'matched_image_count': len(images),
+        'images_glob': args.images if not use_dir_split else None,
+        'train_dir': args.train_dir if use_dir_split else None,
+        'val_dir': args.val_dir if use_dir_split else None,
+        'matched_image_count': n_total,
         'pattern': [pattern[0], pattern[1]],
         'square': float(args.square),
         'use_ransac': bool(args.use_ransac),
-        'split': {
-            'val_ratio': float(val_ratio),
-            'seed': int(args.split_seed),
-            'counts': {'total': n_total, 'train': len(train_images), 'val': len(val_images)}
-        },
+        'split': split_meta,
         'calibrate': {
             'used_image_count': len(calib_res['used_images']),
             'used_images': calib_res['used_images'],
@@ -378,6 +608,18 @@ def cmd_all(args):
             },
             'visualization_dir': val_dir,
             'visualization_files': eval_files_val
+        },
+        'overall_evaluate': {
+            'used_image_count': len(used_all),
+            'used_images': used_all,
+            'overall_reprojection_rms_px': float(overall_rms_all),
+            'per_image_rms_px': per_rms_all,
+            'spatial_distribution': {
+                'rms_grid': rms_grid_all.tolist(),
+                'counts_grid': counts_grid_all.tolist()
+            },
+            'visualization_dir': bundle_dir,
+            'visualization_files': [heat_all]
         },
     }
     out_json = os.path.join(bundle_dir, 'results_all.json')

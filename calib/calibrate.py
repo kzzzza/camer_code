@@ -427,3 +427,92 @@ def calibrate_from_images(image_paths: List[str],
         'b_vec': b,
         'rms': rms
     }
+
+
+def calibrate_from_points(objpoints: List[np.ndarray],
+                          imgpoints: List[np.ndarray],
+                          used_images: List[str],
+                          image_size_hint: Tuple[int, int] = None,
+                          use_ransac: bool = False,
+                          calib_flags: int = None,
+                          criteria: Tuple[int, int, float] = None) -> Dict[str, Any]:
+    """
+    使用已经检测并筛选过的角点集合进行标定。
+
+    要求：
+        - 至少 3 张视图（元素个数）
+        - 每张视图角点数 >= 4（建议更多）
+
+    输入：
+        objpoints/imgpoints: 过滤后的每张图的 3D/2D 点列表（长度一致）
+        used_images: 对应的图像路径列表（用于读取尺寸、记录来源）
+        image_size_hint: 可选，(w,h) 作为图像尺寸提示；如未提供，则从 used_images[0] 读取
+        use_ransac: 决定线性初值阶段的单应估计是否使用 RANSAC
+        calib_flags/criteria: 传递给 refine_parameters 的 OpenCV 标志与终止条件
+
+    返回字段同 calibrate_from_images。
+    """
+    if objpoints is None or imgpoints is None or used_images is None:
+        raise RuntimeError('invalid inputs for calibrate_from_points')
+    if len(objpoints) < 3:
+        raise RuntimeError('至少需要 3 张成功检测到棋盘角点的图片（过滤后）')
+    # 过滤掉角点过少的视图
+    obj_f, img_f, img_paths = [], [], []
+    for op, ip, p in zip(objpoints, imgpoints, used_images):
+        if op is None or ip is None:
+            continue
+        if min(len(op), len(ip)) < 4:
+            continue
+        obj_f.append(op)
+        img_f.append(ip)
+        img_paths.append(p)
+    if len(obj_f) < 3:
+        raise RuntimeError('过滤后有效视图不足 3 张，无法标定')
+
+    # 线性初值
+    Hs = compute_homographies(obj_f, img_f, ransac=use_ransac)
+    K_init, b = intrinsic_from_homographies(Hs)
+
+    # 图像尺寸
+    if image_size_hint is not None:
+        image_size = image_size_hint
+    else:
+        if len(img_paths) == 0:
+            raise RuntimeError('未提供有效的图像路径用于获取尺寸')
+        sample_img = cv2.imread(img_paths[0])
+        if sample_img is None:
+            raise RuntimeError(f'无法读取示例图像获取尺寸: {img_paths[0]}')
+        h, w = sample_img.shape[:2]
+        image_size = (w, h)
+
+    dist_init = np.zeros(2, dtype=np.float64)
+
+    if calib_flags is None:
+        calib_flags = getattr(cv2, 'CALIB_USE_INTRINSIC_GUESS', 0)
+        if hasattr(cv2, 'CALIB_FIX_SKEW'):
+            calib_flags |= getattr(cv2, 'CALIB_FIX_SKEW')
+        if hasattr(cv2, 'CALIB_ZERO_TANGENT_DIST'):
+            calib_flags |= getattr(cv2, 'CALIB_ZERO_TANGENT_DIST')
+        elif hasattr(cv2, 'CALIB_FIX_TANGENT_DIST'):
+            calib_flags |= getattr(cv2, 'CALIB_FIX_TANGENT_DIST')
+        if hasattr(cv2, 'CALIB_FIX_K3'):
+            calib_flags |= getattr(cv2, 'CALIB_FIX_K3')
+
+    if criteria is None:
+        criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 100, 1e-6)
+
+    K_opt, dist_opt, rvecs, tvecs, rms = refine_parameters(
+        K_init, dist_init, obj_f, img_f, image_size,
+        flags=calib_flags, criteria=criteria
+    )
+
+    return {
+        'K_init': K_init,
+        'K': K_opt,
+        'dist': dist_opt,
+        'rvecs': rvecs,
+        'tvecs': tvecs,
+        'used_images': img_paths,
+        'b_vec': b,
+        'rms': rms
+    }
