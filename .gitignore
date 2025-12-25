@@ -4,6 +4,6 @@ __pycache__/
 
 # Ignore calibration result files
 out/
-
+out_old/
 images/
 

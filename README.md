@@ -1,56 +1,51 @@
-# Zhang 相机标定（NJU数字图像处理与计算机视觉大作业231180007）
+# Zhang 相机标定项目（NJU 数字图像处理与计算机视觉课设 231180007）
 
-基于张友定方法 (Zhang, 2000) 的灵活相机标定工程。核心流程：
-- 检测棋盘角点 → 估计单应矩阵（可选 RANSAC）→ 张氏线性内参初值 → OpenCV `calibrateCamera` 联合优化
-- 提供生成标定板、标定、可视化、评估脚本，便于做参数对比实验（skew/切向畸变/k3、RANSAC、迭代准则等）
+基于 Zhang (2000) 方法的相机标定工程。一次执行完成“标定 + 评估 + 打包输出”。核心流程：
+- 棋盘角点检测 → 单应矩阵估计（可选 RANSAC）→ Zhang 线性内参初值 → OpenCV `calibrateCamera` 联合优化
+- 统一 CLI 脚本，支持随机比例/目录/角点位置三种数据集划分；输出残差可视化与空间误差热力图，并写入综合 JSON 报告。
 
 ---
 
-## 工程代码目录结构
+## 项目结构
 
-- `calib/` — 标定库实现
-  - `calib/calibrate.py` — 核心：角点检测、单应估计、Zhang 线性解、外参恢复、联合优化（cv2.calibrateCamera）
+- `calib/` — 标定库
+  - `calib/calibrate.py` — 角点检测、单应估计、Zhang 线性解、外参恢复、联合优化（cv2.calibrateCamera）；同时提供基于“点集合”的标定接口 `calibrate_from_points`。
 - `scripts/` — 命令行脚本
-  - `scripts/calibrate_cli.py` — 统一 CLI
-  - `scripts/generate_chessboard.py` — 生成可打印棋盘板及多种外观/质量变体
-- `images/` — 示例/输出目录（脚本会在此写入）
-  - `images/boards/` — 可打印棋盘板各变体输出（standard/blur/perspective/...）
-  - `images/visualized/` — 可视化输出（角点、重投影残差）
-- `runs/` — 实验日志存放目录
-- `理论文档` — 理论说明HTML文档存放目录
-- `requirements.txt` — Python 依赖
+  - `scripts/calibrate_cli.py` — 统一 CLI（all 模式），数据划分与评估可视化、统一打包输出
+  - `scripts/generate_chessboard.py` — 生成可打印的棋盘板（含多种外观/质量变体）
+  - `scripts/visualize_dataset_corners.py` — 聚合散点显示数据集角点分布（按图片分色）
+- `images/` — 示例/输出目录（脚本会写入）
+  - `images/boards/` — 生成的棋盘板各变体（standard/blur/affine/perspective/contrast/inverted/noise）
+- `run/` — 历次运行的输出（如果配置为写入此处）
+- `理论文档/` — 标定原理与实现说明（HTML）
+- `requirements.txt` — Python 依赖（numpy, opencv-python, scipy, matplotlib）
 
 ---
 
-## 1) Conda 环境配置
-
-推荐在 Conda 环境中安装并运行（Linux/bash）：
+## 环境准备（Linux/bash）
 
 ```bash
-# 1) 创建并激活环境（可选 Python 3.9~3.11）
+# 建议使用 Conda（Python 3.9~3.11 均可）
 conda create -n cam python=3.10 -y
 conda activate cam
 
-# 2) 安装依赖
+# 安装依赖
 pip install -r requirements.txt
 
-```
-请在运行脚本时设置 `PYTHONPATH` 指向项目根：
-
-```bash
+# 运行前将项目根加入 PYTHONPATH（推荐在项目根执行）
 PYTHONPATH=$(pwd) python scripts/calibrate_cli.py --help
 ```
 
 ---
 
-## 2) 命令行使用说明
+## 统一 CLI
 
-本项目的统一 CLI 已简化为单一模式 `--mode all`，旧的子命令（calibrate / evaluate / split-eval / visualize）已在代码中移除。请使用如下方式在一次运行中完成标定与评估，并统一输出到指定 bundle 目录。
+一次运行完成标定与评估，并把所有输出集中到 `out/<bundle>/` 下。
 
-示例（建议使用 RANSAC 与默认稳健设置）：
+示例（随机比例划分）：
 
 ```bash
-PYTHONPATH=$(pwd) python scripts/calibrate_cli.py --mode all \
+PYTHONPATH=$(pwd) python scripts/calibrate_cli.py \
   --images 'images/11_15_2058/*.jpg' \
   --pattern 9 6 \
   --square 0.029 \
@@ -61,57 +56,134 @@ PYTHONPATH=$(pwd) python scripts/calibrate_cli.py --mode all \
   --per-image-heatmap
 ```
 
-参数表（all 模式）
+示例（目录划分）：
 
-| 选项 | 类型/默认 | 说明 |
-|---|---|---|
-| `--images` / `--image` | str, 必填 | 图片 glob（用引号包裹，避免 shell 展开） |
-| `--pattern` | int int, 必填 | 棋盘“内角点”数：cols rows（如 9 6） |
-| `--square` | float, 必填 | 方格物理尺寸（单位自定，影响外参尺度，不影响像素 RMS） |
-| `--use-ransac` | flag=false | 单应使用 RANSAC，提高鲁棒性 |
-| `--free-skew` | flag=false | 允许估计 skew（不推荐，一般相机应≈0） |
-| `--free-tangential` | flag=false | 允许切向畸变 p1/p2（默认置零） |
-| `--enable-k3` | flag=false | 允许 k3（默认固定 0） |
-| `--fix-principal-point` | flag=false | 固定主点（需 OpenCV 支持该 flag） |
-| `--iter` | int=100 | 最大迭代次数（传入 OpenCV 终止准则） |
-| `--eps` | float=1e-6 | 收敛阈值（传入 OpenCV 终止准则） |
-| `--show-vis` | flag=false | 屏幕显示可视化图像（评估阶段） |
-| `--arrow-scale` | float=1.0 | 评估残差箭头缩放系数 |
-| `--grid` | int int=10 8 | 空间误差统计网格（列 行），用于聚合所有图的误差分布 |
-| `--per-image-heatmap` | flag=false | 同时输出每张图片的误差热力图（输出到 bundle 目录） |
-| `--bundle` | str=None | 将输出统一打包到项目根 `out/<name>/` 下（单一 JSON + 所有图片） |
-| `--val-ratio` | float=0.3 | 验证集占比（其余作为训练集，仅用训练集进行标定） |
-| `--split-seed` | int=42 | 数据划分随机种子（保证复现） |
+```bash
+PYTHONPATH=$(pwd) python scripts/calibrate_cli.py \
+  --train-dir images/train \
+  --val-dir images/val \
+  --pattern 9 6 \
+  --square 0.029 \
+  --use-ransac \
+  --bundle run_dir_split
+```
 
-输出内容（bundle 模式，带训练/验证划分）：
+示例（角点位置划分：仅用指定区域的角点进行训练，验证使用全量角点）：
 
-- 根目录：`out/<bundle>/`
-  - 综合 JSON：`results_all.json`（含 split 信息、训练标定结果、train/val 的评估指标与可视化文件列表）
-  - 训练子目录：`out/<bundle>/train/`
-    - 每张训练图片残差可视化 PNG
-    - 训练集聚合热力图：`rms_heatmap.png`
-    - 子集 JSON：`results_train.json`
-  - 验证子目录：`out/<bundle>/val/`
-    - 每张验证图片残差可视化 PNG（若角点检测成功）
-    - 验证集聚合热力图：`rms_heatmap.png`
-    - 子集 JSON：`results_val.json`
+```bash
+PYTHONPATH=$(pwd) python scripts/calibrate_cli.py \
+  --image 'images/a/*' \
+  --pattern 16 12 \
+  --square 0.015 \
+  --point-split \
+  --train-urange 0.3 0.6 \
+  --train-vrange 0.3 0.6 \
+  --bundle run_point_middle \
+  --use-ransac
+```
 
-可视化与色彩规则：
+### 参数说明
 
-- 残差图：在每张图片上绘制投影点与观测点的连线箭头，箭头颜色按残差像素值映射（越大越趋近红色），支持 `--arrow-scale` 控制箭头长度。
-- 空间热力图：将所有图像的归一化像素坐标按 `--grid` 指定的网格（默认 10×8）进行聚合统计，对每格的 RMS 残差用 OpenCV 的 `COLORMAP_JET` 着色；没有数据的格子显示为黑色。
+基础输入：
+- `--images` / `--image`：图片 glob（用引号包裹，避免 shell 展开）
+- `--pattern cols rows`：棋盘“内角点”数（如 9 6）
+- `--square`：棋盘方格物理尺寸（单位自定，影响外参尺度，不影响像素 RMS）
+
+标定选项：
+- `--use-ransac`：单应矩阵估计使用 RANSAC，提高鲁棒性
+- `--free-skew`：允许估计 skew（默认固定为 0）
+- `--free-tangential`：允许切向畸变 p1/p2（默认置零）
+- `--enable-k3`：允许三阶径向畸变 k3（默认固定为 0）
+- `--fix-principal-point`：固定主点（若 OpenCV 版本支持）
+- `--iter` / `--eps`：OpenCV 联合优化终止准则（最大迭代，收敛阈值）
+
+评估/输出选项：
+- `--show-vis`：在屏幕显示残差可视化
+- `--arrow-scale`：残差箭头缩放系数
+- `--grid cols rows`：空间误差统计网格尺寸（默认 10×8）
+- `--per-image-heatmap`：输出每张图片的热力图（默认只输出聚合热力图）
+- `--bundle name`：将所有输出打包到 `out/<name>/`
+
+数据集划分（三选一，优先级从上到下）：
+- 角点位置划分：`--point-split --train-urange umin umax --train-vrange vmin vmax`（训练仅用位于该归一化区域的角点；验证使用全量角点）
+- 目录划分：`--train-dir ... --val-dir ...`（各目录下的所有文件分别作为训练/验证）
+- 随机比例划分：`--images ... --val-ratio r --split-seed s`
+
+---
+
+## 输出内容与可视化
+
+运行后，统一输出到 `out/<bundle>/`：
+
+- 根目录：
+  - `results_all.json`：综合报告（含划分信息、标定结果、train/val/overall 评估与图片列表）
+  - `rms_heatmap_all.png`：所有图片聚合的空间误差热力图
+- 训练子目录 `out/<bundle>/train/`：
+  - 每张训练图片的残差可视化 PNG（箭头颜色随残差值增大趋近红色）
+  - `rms_heatmap.png`：训练集聚合热力图
+  - `results_train.json`：训练集评估摘要
+- 验证子目录 `out/<bundle>/val/`：
+  - 每张验证图片的残差可视化 PNG（若角点检测成功）
+  - `rms_heatmap.png`：验证集聚合热力图
+  - `results_val.json`：验证集评估摘要
+
+空间热力图说明：
+- 先计算每个角点的重投影残差幅值（像素），将其按归一化坐标 $(u/W, v/H)$ 落入 `cols×rows` 网格聚合，计算每格 RMS。
+- 使用 OpenCV `COLORMAP_JET` 着色；没有数据的格子显示为黑色。
 
 `results_all.json` 字段摘要：
+- 顶层：`timestamp`、`opencv_version`、`images_glob` 或 `train_dir/val_dir`、`matched_image_count`、`pattern`、`square`、`use_ransac`、`split`
+- `calibrate`：`used_image_count`、`used_images`、`K_init`、`K`、`dist(k1,k2)`、`calibrate_rms`
+- `train_evaluate / val_evaluate / overall_evaluate`：各子集的 `overall_reprojection_rms_px`、`per_image_rms_px`、`spatial_distribution(rms_grid/counts_grid)`、`visualization_files`
 
-- 顶层：`timestamp`、`opencv_version`、`mode='all'`、`images_glob`、`matched_image_count`、`pattern`、`square`、`use_ransac`
-- `calibrate`：`used_image_count`、`used_images`、`K_init`、`K`、`dist`、`calibrate_rms`
-- `evaluate`：`overall_reprojection_rms_px`、`per_image_rms_px`、`spatial_distribution.rms_grid` 与 `counts_grid`、`visualization_files`
+注意与建议：
+- 标定与评估至少需要 3 张成功检测到角点的视图；点级划分模式下，每张训练视图需 ≥4 个角点。
+- 若训练角点集中在狭小区域，Zhang 线性初值可能退化；请保证足够的视角变化与角点数量。
 
+---
 
-以下命令需在项目根执行，或显式设置 `PYTHONPATH=/path/to/project_root`。
+## 生成可打印棋盘板（variants）
 
+脚本：`scripts/generate_chessboard.py`
 
-## 参考
+支持生成以下变体（逗号分隔传入 `--variants`）：
+- `standard`（标准黑白高对比）、`blur`（高斯模糊）、`affine`（轻微旋转缩放）、`perspective`（轻微透视倾斜）、
+  `contrast`（对比度/亮度/伽马）、`inverted`（黑白反转）、`noise`（高斯噪声）
+
+示例：
+
+```bash
+PYTHONPATH=$(pwd) python scripts/generate_chessboard.py \
+  --pattern 9 6 --square 50 --count 5 \
+  --variants standard,blur,perspective,noise,contrast \
+  --affine-rotate 5 --perspective-tilt 0.07 --noise-sigma 6
+```
+
+输出：`images/boards/<variant>/chess_<cols>x<rows>_<index>.png`
+
+---
+
+## 聚合可视化数据集角点（散点）
+
+脚本：`scripts/visualize_dataset_corners.py`
+
+作用：将所有图片的角点按归一化坐标聚合到同一画布，按“图片分组”上色，便于观察角点全局分布与覆盖范围。
+
+示例：
+
+```bash
+PYTHONPATH=$(pwd) python scripts/visualize_dataset_corners.py \
+  --images 'images/11_15_2058/*.jpg' \
+  --pattern 9 6 \
+  --square 0.029 \
+  --out out/corners_dataset_scatter.png
+```
+
+输出：`out/corners_dataset_scatter.png`（画布尺寸取数据集中图片的原始大小；点颜色按图片分组区分）
+
+---
+
+## 参考资料
 
 - Zhang, Z. (2000). A Flexible New Technique for Camera Calibration. IEEE TPAMI.
 - OpenCV Calibration: https://docs.opencv.org/4.x/d9/d0c/group__calib3d.html
